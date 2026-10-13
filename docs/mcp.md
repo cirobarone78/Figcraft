@@ -18,6 +18,8 @@ Attached calls are never automatically replayed after a transport failure: the a
 applied the request before its reply was lost. The error reports that the operation may have
 completed; inspect the document before retrying an edit. The next explicit call reconnects.
 If that connection cannot be established, the error says the request was not sent.
+A connection the app closed while it sat idle is noticed before the next request is written and
+replaced then, so a pause between calls is not an error.
 
 ### Fonts
 

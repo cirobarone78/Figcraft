@@ -133,6 +133,19 @@ impl Attached {
         Err(last)
     }
 
+    /// The app already closed this connection (it drops ones idle past its socket timeout), or
+    /// left bytes on it nobody asked for. Checked before a request is written, when replacing the
+    /// connection can't repeat anything.
+    fn stale(&mut self) -> bool {
+        let Some((reader, writer)) = self.conn.as_mut() else { return false };
+        if !reader.buffer().is_empty() || writer.set_nonblocking(true).is_err() {
+            return true;
+        }
+        // Nothing to read on a healthy idle connection: the peek would block.
+        let idle = matches!(writer.peek(&mut [0]), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+        writer.set_nonblocking(false).is_err() || !idle
+    }
+
     fn roundtrip(&mut self, line: &str) -> std::io::Result<String> {
         let Some((reader, writer)) = self.conn.as_mut() else {
             return Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected to the app"));
@@ -153,7 +166,7 @@ impl Backend for Attached {
         let id = self.next_id;
         self.next_id += 1;
         let line = json!({"id": id, "method": method, "params": params}).to_string();
-        if self.conn.is_none() {
+        if self.conn.is_none() || self.stale() {
             self.reconnect().map_err(|e| {
                 format!("FigCraft app at {} is not reachable: {e} (request was not sent; start it with `figcraft --control PORT`)", self.addr)
             })?;
