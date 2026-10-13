@@ -789,6 +789,10 @@ impl Session {
     /// as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        // Revert replaces the document's uid: refuse before ending previews or syncing branches.
+        if id == "file.revert" && self.live().doc_uid.is_some() {
+            return Err(EngineError::Disabled(id.into(), "leave the live session before reverting to the saved file".into()));
+        }
         branches::sync(self);
         if textpreview::COMMANDS.contains(&id) {
             // A live preview is no edit: no undo step, normalisation or rollback here.

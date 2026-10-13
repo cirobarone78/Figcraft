@@ -112,7 +112,7 @@ pub fn specs() -> Vec<CommandSpec> {
             s.active = s.docs.len() - 1;
             Ok(json!({"index": s.active}))
         }),
-        spec!("file.revert", "Revert to saved", "{}", false, |s, _| {
+        spec!("file.revert", "Revert to saved", "{}  leave the live session first, if any", false, |s, _| {
             let path = s.ds()?.path.clone().ok_or_else(|| EngineError::Disabled("file.revert".into(), "the file was never saved".into()))?;
             let (loaded, _) = load_path(&path, None)?;
             let i = s.active;
