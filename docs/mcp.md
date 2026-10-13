@@ -5,6 +5,11 @@ design with it: create and edit layers, run any menu command, inspect the result
 it as a PNG. It speaks newline-delimited JSON-RPC 2.0 over stdio (MCP protocol `2025-06-18`;
 `2025-03-26` and `2024-11-05` clients are accepted too).
 
+Incoming lines are limited to **32 MiB before the newline**, including whitespace. The limit is
+enforced while reading: an oversized or unterminated frame stops at the first excess byte, returns
+JSON-RPC error `-32600` (`message too large`, null id), and closes the stdio session without reading
+the rest or dispatching later requests. Lines within the limit keep the same JSON-RPC behavior.
+
 The server lives in `crates/mcp` (`figcraft-mcp`) and is started by the CLI:
 
 | Command | Backend |

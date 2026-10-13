@@ -21,6 +21,20 @@ real UI state. A request that the UI doesn't answer within 60 s gets a timeout e
 not JSON gets `{"id": null, "ok": false, "error": "bad JSON: …"}`. The implementation is in
 `crates/ui-egui/src/control.rs` (methods) and `apps/figcraft/src/control_server.rs` (socket).
 
+A request line is limited to **32 MiB before the newline**, including whitespace. The reader stops
+at the first excess byte, replies `{"id": null, "ok": false, "error": "message too large"}`, then
+closes the connection without consuming the rest of the frame. The server accepts at most **8
+active connections**; additional connections are closed immediately. Socket reads and writes each
+have a **60 s inactivity timeout**, so idle clients and clients that stop reading release their
+worker. This bounds blocked socket operations, not the total duration of a frame arriving slowly.
+Clients can reconnect after an idle timeout (the attached MCP backend already does).
+
+Both the socket queue and the UI queue hold at most **8 requests** each, including requests waiting
+for another window's frame. A full socket queue replies with `"control request queue is full"`
+instead of dispatching the new request. These limits apply to the opt-in loopback control channel;
+requests still queued after the UI timeout are discarded, including requests deferred to a hidden
+window. A command already running is not interrupted.
+
 Coordinates are page units, y down. `x`/`y` in `node.set`/`node.create` are relative to the parent
 frame (groups have no coordinate space of their own).
 
