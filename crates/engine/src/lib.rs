@@ -1062,24 +1062,74 @@ impl Session {
     }
 
     /// Run `f` as one undo step called `label`: the commands it executes push no steps of their
-    /// own, and when it fails the document, selection, page and history are put back.
+    /// own, and when it fails the complete session state is put back.
     pub fn grouped<T>(&mut self, label: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let ds = self.ds_mut()?;
-        let (before, sel, page, saved_len, uid) = (ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.undo.len(), ds.uid);
+        self.ds()?;
+        let docs = self.docs.clone();
+        let active = self.active;
+        let clipboard = self.clipboard.clone();
+        let prefs = self.prefs.clone();
+        let tool = self.tool.clone();
+        let ui_requests = self.ui_requests.clone();
+        let ui_dark = self.ui_dark;
+        let journal = self.journal.clone();
+        let recent_colors = self.recent_colors.clone();
+        let last_command = self.last_command.clone();
+        let message = self.message.clone();
+        let libraries = self.libraries.clone();
+        let before: Vec<_> = docs
+            .iter()
+            .map(|ds| (ds.uid, ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.limit))
+            .collect();
+
         // The steps inside are dropped again below, so they mustn't push the oldest ones out.
-        let limit = std::mem::replace(&mut ds.history.limit, usize::MAX);
-        self.live_hold(uid, true);
+        for ds in &mut self.docs {
+            ds.history.limit = usize::MAX;
+        }
+        for (uid, _, _, _, _) in &before {
+            self.live_hold(*uid, true);
+        }
         let result = f(self);
-        self.live_hold(uid, false);
-        let Some(ds) = self.docs.iter_mut().find(|d| d.uid == uid) else { return result };
-        ds.history.limit = limit;
-        ds.history.undo.truncate(saved_len);
+        for (uid, _, _, _, _) in &before {
+            self.live_hold(*uid, false);
+        }
+
         if result.is_err() {
-            ds.doc = before;
-            ds.selection = sel;
-            ds.page = page;
-        } else if !Arc::ptr_eq(&before, &ds.doc) {
-            self.record(uid, Some(label), before, sel, page);
+            self.docs = docs;
+            self.active = active;
+            self.clipboard = clipboard;
+            self.prefs = prefs;
+            self.tool = tool;
+            self.ui_requests = ui_requests;
+            self.ui_dark = ui_dark;
+            self.journal = journal;
+            self.recent_colors = recent_colors;
+            self.last_command = last_command;
+            self.message = message;
+            self.libraries = libraries;
+            return result;
+        }
+
+        let changed: Vec<_> = before
+            .iter()
+            .filter_map(|(uid, doc, selection, page, _)| {
+                let ds = self.docs.iter().find(|d| d.uid == *uid)?;
+                (!Arc::ptr_eq(doc, &ds.doc) && ds.interaction.is_none())
+                    .then(|| (*uid, doc.clone(), selection.clone(), *page))
+            })
+            .collect();
+        for ds in &mut self.docs {
+            if let Some((_, _, _, _, limit)) = before.iter().find(|before| before.0 == ds.uid) {
+                ds.history.limit = *limit;
+                ds.history.undo.truncate(
+                    docs.iter()
+                        .find(|original| original.uid == ds.uid)
+                        .map_or(0, |original| original.history.undo.len()),
+                );
+            }
+        }
+        for (uid, doc, selection, page) in changed {
+            self.record(uid, Some(label), doc, selection, page);
         }
         result
     }
