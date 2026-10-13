@@ -134,9 +134,6 @@ impl Attached {
     }
 
     fn roundtrip(&mut self, line: &str) -> std::io::Result<String> {
-        if self.conn.is_none() {
-            self.reconnect()?;
-        }
         let Some((reader, writer)) = self.conn.as_mut() else {
             return Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected to the app"));
         };
@@ -156,17 +153,19 @@ impl Backend for Attached {
         let id = self.next_id;
         self.next_id += 1;
         let line = json!({"id": id, "method": method, "params": params}).to_string();
-        // One retry with a fresh connection (the app may have restarted).
-        let reply = match self.roundtrip(&line) {
-            Ok(r) => r,
-            Err(_) => {
-                self.conn = None;
-                self.roundtrip(&line).map_err(|e| {
-                    self.conn = None;
-                    format!("FigCraft app at {} is not reachable: {e} (start it with `figcraft --control PORT`)", self.addr)
-                })?
-            }
-        };
+        if self.conn.is_none() {
+            self.reconnect().map_err(|e| {
+                format!("FigCraft app at {} is not reachable: {e} (request was not sent; start it with `figcraft --control PORT`)", self.addr)
+            })?;
+        }
+        // A lost reply does not mean the app failed to apply the request.
+        let reply = self.roundtrip(&line).map_err(|e| {
+            self.conn = None;
+            format!(
+                "FigCraft control call `{method}` at {} failed: {e}; the operation may have completed. Inspect the document before retrying.",
+                self.addr
+            )
+        })?;
         let v: Value = serde_json::from_str(reply.trim()).map_err(|e| format!("bad reply from the app: {e}"))?;
         if v.get("ok").and_then(Value::as_bool) == Some(true) {
             Ok(v.get("result").cloned().unwrap_or(Value::Null))

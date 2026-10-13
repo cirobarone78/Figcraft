@@ -14,6 +14,11 @@ The server lives in `crates/mcp` (`figcraft-mcp`) and is started by the CLI:
 
 `--attach` also takes `host:port`. The control channel only listens on 127.0.0.1.
 
+Attached calls are never automatically replayed after a transport failure: the app may have
+applied the request before its reply was lost. The error reports that the operation may have
+completed; inspect the document before retrying an edit. The next explicit call reconnects.
+If that connection cannot be established, the error says the request was not sent.
+
 ### Fonts
 
 The headless server lays text out with the same fonts as the app: the fonts built into FigCraft

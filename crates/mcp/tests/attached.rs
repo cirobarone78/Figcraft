@@ -70,3 +70,46 @@ fn attached_to_nothing_fails_cleanly() {
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     assert!(Attached::port(port).is_err());
 }
+
+#[test]
+fn lost_mutation_reply_is_not_replayed_and_next_call_reconnects() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = std::thread::spawn(move || {
+        let mut h = Headless::new();
+        let mut methods = Vec::new();
+        for lose_reply in [true, false] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let method = request["method"].as_str().unwrap();
+            methods.push(method.to_string());
+            let result = h.call(method, request["params"].clone()).unwrap();
+            if !lose_reply {
+                writeln!(stream, "{}", json!({"id": request["id"], "ok": true, "result": result})).unwrap();
+            }
+        }
+        methods
+    });
+    let mut backend = Attached::port(port).unwrap();
+    let result = backend.call("engine.execute", json!({"command": "shape.rectangle", "params": {"width": 64, "height": 32}}));
+    assert!(result.is_err(), "a lost reply must not turn into a successful replay: {result:?}");
+    let error = result.unwrap_err();
+    assert!(error.contains("may have completed"), "{error}");
+    assert!(error.contains("before retrying"), "{error}");
+    let doc = backend.call("document.inspect", json!({"depth": 1})).unwrap();
+    assert_eq!(doc["pages"][0]["children"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(app.join().unwrap(), ["engine.execute", "document.inspect"]);
+}
+
+#[test]
+fn reconnect_failure_reports_request_not_sent() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut backend = Attached::port(listener.local_addr().unwrap().port()).unwrap();
+    drop(listener);
+    assert!(backend.call("document.inspect", json!({})).is_err());
+    let error = backend.call("document.inspect", json!({})).unwrap_err();
+    assert!(error.contains("request was not sent"), "{error}");
+}
