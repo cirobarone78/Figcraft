@@ -5,6 +5,11 @@ design with it: create and edit layers, run any menu command, inspect the result
 it as a PNG. It speaks newline-delimited JSON-RPC 2.0 over stdio (MCP protocol `2025-06-18`;
 `2025-03-26` and `2024-11-05` clients are accepted too).
 
+Incoming lines are limited to **32 MiB before the newline**, including whitespace. The limit is
+enforced while reading: an oversized or unterminated frame stops at the first excess byte, returns
+JSON-RPC error `-32600` (`message too large`, null id), and closes the stdio session without reading
+the rest or dispatching later requests. Lines within the limit keep the same JSON-RPC behavior.
+
 The server lives in `crates/mcp` (`figcraft-mcp`) and is started by the CLI:
 
 | Command | Backend |
@@ -13,6 +18,13 @@ The server lives in `crates/mcp` (`figcraft-mcp`) and is started by the CLI:
 | `figcraft-cli mcp --attach <port>` | **Attached**: drives a running FigCraft app through its control channel (`figcraft --control <port>`). The user sees every change live. |
 
 `--attach` also takes `host:port`. The control channel only listens on 127.0.0.1.
+
+Attached calls are never automatically replayed after a transport failure: the app may have
+applied the request before its reply was lost. The error reports that the operation may have
+completed; inspect the document before retrying an edit. The next explicit call reconnects.
+If that connection cannot be established, the error says the request was not sent.
+A connection the app closed while it sat idle is noticed before the next request is written and
+replaced then, so a pause between calls is not an error.
 
 ### Fonts
 

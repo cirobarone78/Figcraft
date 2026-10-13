@@ -74,8 +74,12 @@ pub struct Limits {
     pub max_calls: u32,
     /// Largest string passed either way (command params, results, logs).
     pub max_message: usize,
-    /// Log lines kept per run.
+    /// Log lines kept and forwarded per run. Exceeding any log limit fails the run.
     pub max_logs: usize,
+    /// Largest log line in UTF-8 bytes, also subject to [`Limits::max_message`].
+    pub max_log_line_bytes: usize,
+    /// Total log bytes kept and forwarded per run (excluding string/vector overhead).
+    pub max_log_bytes: usize,
 }
 
 impl Default for Limits {
@@ -88,6 +92,8 @@ impl Default for Limits {
             max_calls: 100_000,
             max_message: 16 * 1024 * 1024,
             max_logs: 1000,
+            max_log_line_bytes: 8 * 1024,
+            max_log_bytes: 1024 * 1024,
         }
     }
 }
@@ -118,7 +124,8 @@ pub trait Host {
     fn selection(&mut self) -> String;
     /// A message for the user.
     fn notify(&mut self, message: &str);
-    /// A line of the run's log, as the plugin writes it (it's also in [`RunOutput::logs`]).
+    /// An admitted line of the run's log (also in [`RunOutput::logs`]). Log limits apply before
+    /// this is called, including on runs that later fail.
     fn log(&mut self, _line: &str) {}
     /// The plugin's setting `key` (JSON text).
     fn setting(&mut self, _key: &str) -> Option<String> {
@@ -171,6 +178,7 @@ struct State {
     store_limits: StoreLimits,
     reply: Vec<u8>,
     out: RunOutput,
+    log_bytes: usize,
     /// A limit the host tripped (reported instead of the trap it causes).
     abort: Option<PluginError>,
     request: Option<Request>,
@@ -200,9 +208,7 @@ impl State {
             Request::Selection => Some(self.set_reply(host.selection().into_bytes())),
             Request::Log(line) => {
                 host.log(&line);
-                if self.out.logs.len() < self.limits.max_logs {
-                    self.out.logs.push(line);
-                }
+                self.out.logs.push(line);
                 None
             }
             Request::Notify(msg) => {
@@ -308,7 +314,7 @@ impl Instance {
         let module = compile(&engine, bytes, limits)?;
         let store_limits =
             StoreLimitsBuilder::new().memory_size(limits.memory_bytes).memories(1).tables(4).table_elements(100_000).instances(1).build();
-        let state = State { limits: *limits, store_limits, reply: Vec::new(), out: RunOutput::default(), abort: None, request: None };
+        let state = State { limits: *limits, store_limits, reply: Vec::new(), out: RunOutput::default(), log_bytes: 0, abort: None, request: None };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.store_limits);
         store.set_fuel(limits.fuel).map_err(|e| PluginError::Trap(e.to_string()))?;
@@ -327,6 +333,7 @@ impl Instance {
         let st = self.store.data_mut();
         st.reply = input.as_bytes().to_vec();
         st.out = RunOutput::default();
+        st.log_bytes = 0;
         st.abort = None;
         st.request = None;
         self.store.set_fuel(limits.fuel).map_err(|e| PluginError::Trap(e.to_string()))?;
@@ -427,6 +434,28 @@ fn read_str(caller: &mut Ctx<'_>, ptr: i32, len: i32) -> Result<String, wasmi::E
     String::from_utf8(bytes).map_err(|_| abort(caller, PluginError::Trap("a string isn't valid UTF-8".into())))
 }
 
+/// Admit a log before copying guest memory. The same budgets bound retained logs and `Host::log`,
+/// so dropping a retained line cannot leave unbounded forwarding to the host logger.
+fn read_log(caller: &mut Ctx<'_>, ptr: i32, len: i32) -> Result<String, wasmi::Error> {
+    let bytes = len as u32 as usize;
+    let limits = caller.data().limits;
+    if bytes > limits.max_log_line_bytes {
+        return Err(abort(caller, PluginError::Limit(format!("a {bytes}-byte log line is too long (limit: {} bytes)", limits.max_log_line_bytes))));
+    }
+    if caller.data().out.logs.len() >= limits.max_logs {
+        return Err(abort(caller, PluginError::Limit(format!("more than {} log lines", limits.max_logs))));
+    }
+    let total = caller
+        .data()
+        .log_bytes
+        .checked_add(bytes)
+        .filter(|total| *total <= limits.max_log_bytes)
+        .ok_or_else(|| abort(caller, PluginError::Limit(format!("more than {} log bytes", limits.max_log_bytes))))?;
+    let line = read_str(caller, ptr, len)?;
+    caller.data_mut().log_bytes = total;
+    Ok(line)
+}
+
 fn linker(engine: &Engine) -> Result<Linker<State>, PluginError> {
     let mut l = <Linker<State>>::new(engine);
     let err = |e: wasmi::errors::LinkerError| PluginError::InvalidModule(e.to_string());
@@ -459,7 +488,7 @@ fn linker(engine: &Engine) -> Result<Linker<State>, PluginError> {
     .map_err(err)?;
     l.func_wrap(IMPORT_MODULE, "log", |mut c: Ctx<'_>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
         charge(&mut c)?;
-        let line = read_str(&mut c, ptr, len)?;
+        let line = read_log(&mut c, ptr, len)?;
         Err(ask(&mut c, Request::Log(line)))
     })
     .map_err(err)?;

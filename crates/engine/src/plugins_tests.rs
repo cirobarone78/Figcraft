@@ -51,6 +51,7 @@ fn script(calls: &[(&str, Value)], on_refusal: OnRefusal, tail: &str) -> Vec<u8>
           (import "figcraft" "reply_read" (func $reply_read (param i32 i32) (result i32)))
           (import "figcraft" "set_output" (func $set_output (param i32 i32)))
           (import "figcraft" "notify" (func $notify (param i32 i32)))
+          (import "figcraft" "log" (func $log (param i32 i32)))
           (memory (export "memory") 2)
           {data}
           (func (export "figcraft_run") (param $n i32) (result i32) (local $sel i32)
@@ -216,6 +217,26 @@ fn traps_endless_loops_and_memory_hogs_roll_back() {
         wat::parse_str(r#"(module (memory (export "memory") 3000) (func (export "figcraft_run") (param i32) (result i32) (i32.const 0)))"#).unwrap();
     install(&mut s, manifest("org.test.hog", "write", &[]), &hog);
     assert!(run_err(&mut s, "org.test.hog").contains("memory limit"));
+}
+
+#[test]
+fn exceeding_a_log_limit_rolls_back_the_plugins_edits() {
+    let mut s = Session::new();
+    let a = rect(&mut s, 0.0);
+    ex(&mut s, "select.set", json!({"ids": [a]}));
+    let edits = [("object.rename", json!({"name": "Half done"})), ("shape.rectangle", json!({"x": 90, "y": 0, "width": 5, "height": 5}))];
+    let wasm = script(&edits, OnRefusal::Fail, "(call $log (i32.const 80000) (i32.const 8193))");
+    let id = "org.test.log-limit";
+    install(&mut s, manifest(id, "write", &[]), &wasm);
+    let ds = s.ds().unwrap();
+    let (doc, page, selection, undo) = (ds.doc.clone(), ds.page, s.selection(), undo_len(&s));
+    let error = run_err(&mut s, id);
+    assert!(error.contains("log line") && error.contains("8192"), "{error}");
+    assert_eq!(s.doc().unwrap(), doc.as_ref());
+    assert_eq!(s.ds().unwrap().page, page);
+    assert_eq!(s.selection(), selection);
+    assert_eq!(undo_len(&s), undo);
+    assert_eq!(node(&s, a).name, "Rectangle");
 }
 
 #[test]

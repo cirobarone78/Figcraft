@@ -362,7 +362,7 @@ const MAX_EFFECT_MARGIN_PX: f64 = 2048.0;
 
 /// Draw node `id` onto `pix`, where `parent_xf` maps the parent's space to `pix` pixels.
 pub fn draw_node(ctx: &Ctx, pix: &mut Pixmap, id: NodeId, parent_xf: Affine, depth: usize) {
-    if depth > 256 || ctx.skip.contains(&id) {
+    if depth > crate::MAX_EXPORT_DEPTH || ctx.skip.contains(&id) {
         return;
     }
     let Some(n) = ctx.doc.node(id) else { return };

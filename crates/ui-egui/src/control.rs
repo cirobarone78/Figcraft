@@ -42,6 +42,14 @@ pub struct ControlRequest {
     pub method: String,
     pub params: Value,
     pub reply: std::sync::mpsc::Sender<ControlReply>,
+    /// The transport stops waiting after its timeout; discard requests still queued then.
+    pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ControlRequest {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Pending screenshot replies.
@@ -87,6 +95,9 @@ pub fn drain(app: &mut FigApp, ctx: &Context) {
     }
     let reqs = std::mem::take(&mut app.control_queue);
     for r in reqs {
+        if r.is_cancelled() {
+            continue;
+        }
         // Requests for another window wait for its frame.
         let target = r.params.get("window").and_then(Value::as_u64).unwrap_or(app.windows.focused);
         if target != app.windows.current {

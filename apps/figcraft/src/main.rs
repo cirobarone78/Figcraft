@@ -51,9 +51,7 @@ impl eframe::App for App {
             }
         }
         let title = with_app(|fig| {
-            let mut q = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            fig.control_queue.extend(q.drain(..));
-            drop(q);
+            control_server::drain_queue(&self.queue, &mut fig.control_queue);
             // Closing the window asks about unsaved changes (and keeps the app running while other
             // windows are open).
             figcraft_ui_egui::windows::on_close_request(fig, ctx);

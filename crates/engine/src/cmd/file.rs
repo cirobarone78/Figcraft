@@ -112,7 +112,7 @@ pub fn specs() -> Vec<CommandSpec> {
             s.active = s.docs.len() - 1;
             Ok(json!({"index": s.active}))
         }),
-        spec!("file.revert", "Revert to saved", "{}", false, |s, _| {
+        spec!("file.revert", "Revert to saved", "{}  leave the live session first, if any", false, |s, _| {
             let path = s.ds()?.path.clone().ok_or_else(|| EngineError::Disabled("file.revert".into(), "the file was never saved".into()))?;
             let (loaded, _) = load_path(&path, None)?;
             let i = s.active;
@@ -782,8 +782,11 @@ pub fn export_bytes_with(doc: &Document, ids: &[NodeId], setting: &ExportSetting
     if ids.is_empty() {
         return Err(nothing());
     }
-    let area = export_area(doc, ids, setting).ok_or_else(nothing)?;
     let drawn = drawn_layers(doc, ids, setting);
+    if matches!(setting.format, ExportFormat::Svg | ExportFormat::Pdf) {
+        figcraft_render::check_export_depth(doc, &drawn).map_err(|e| EngineError::Other(e.to_string()))?;
+    }
+    let area = export_area(doc, ids, setting).ok_or_else(nothing)?;
     // The layers' own area unless an option or a slice says otherwise.
     let own_area = setting.contents_only
         && !setting.include_bounding_box
@@ -797,7 +800,10 @@ pub fn export_bytes_with(doc: &Document, ids: &[NodeId], setting: &ExportSetting
                 simplify_stroke: setting.svg_simplify_stroke,
                 bounds: Some(area),
             };
-            figcraft_svg::export_svg(&doc.in_srgb(), &drawn, &opts).map(String::into_bytes).ok_or_else(nothing)
+            figcraft_svg::try_export_svg(&doc.in_srgb(), &drawn, &opts).map(String::into_bytes).map_err(|e| match e {
+                figcraft_svg::SvgError::Empty => nothing(),
+                other => EngineError::Other(other.to_string()),
+            })
         }
         ExportFormat::Pdf => {
             let doc = &*doc.in_srgb();
@@ -877,6 +883,11 @@ pub fn fig_bytes(doc: &Document) -> Result<(Vec<u8>, Vec<String>)> {
 
 /// The scale that gives `ids` (their export area together) `setting`'s export size.
 pub fn export_scale(doc: &Document, ids: &[NodeId], setting: &ExportSetting) -> f64 {
+    // Size-based exports ask for bounds before encoding. Let encoding report the depth error
+    // without entering a recursive bounds walk here; SVG/PDF do not use this raster scale.
+    if matches!(setting.format, ExportFormat::Svg | ExportFormat::Pdf) && figcraft_render::check_export_depth(doc, ids).is_err() {
+        return 1.0;
+    }
     export_area(doc, ids, setting).map_or(1.0, |b| setting.size.scale_for(b.width(), b.height()))
 }
 

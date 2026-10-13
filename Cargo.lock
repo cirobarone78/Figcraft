@@ -1667,6 +1667,7 @@ dependencies = [
  "figcraft-pathops",
  "figcraft-render",
  "figcraft-text",
+ "thiserror 2.0.21",
  "usvg",
 ]
 

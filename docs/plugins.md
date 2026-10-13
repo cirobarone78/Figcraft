@@ -26,6 +26,27 @@ permissions its manifest asks for, and nothing more.
   updated when a newer version is published (see [Plugin directories](#plugin-directories)). No
   third-party service is involved.
 
+## Logging limits
+
+Logs have separate limits from the plugin's WebAssembly memory and general message limits. By
+default, each run or panel/widget callback may log at most:
+
+| Limit | Default |
+|---|---|
+| UTF-8 bytes per log line | 8 KiB |
+| Total UTF-8 log bytes | 1 MiB |
+| Log lines (including empty lines) | 1,000 |
+
+The sandbox checks these limits before copying a line from plugin memory or forwarding it to the
+application logger. Accepted lines are kept in the run's `logs` result and forwarded once; the
+same byte and count budgets apply to both. The byte budget counts the strings' contents, excluding
+their container overhead. The general message limit also applies to log lines.
+
+Exceeding a log limit fails the run with a limit error and rolls back its document edits, selection
+and page, just like other sandbox failures. Earlier accepted lines may already have reached the
+application log. Each callback starts with fresh budgets. Keep log messages short and summarize
+large data instead of logging it in full.
+
 ## Using plugins
 
 - **Plugins ▸ Development ▸ Import plugin from manifest…** picks a `figcraft-plugin.json`. The
