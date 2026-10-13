@@ -12,7 +12,7 @@ use figcraft_doc::NodeId;
 /// What a test plugin does when a call is refused: fail the run (status 1), or carry on and report
 /// the refusal as its output.
 #[derive(Clone, Copy, PartialEq)]
-enum OnRefusal {
+pub(crate) enum OnRefusal {
     Fail,
     Report,
 }

@@ -1066,70 +1066,57 @@ impl Session {
     }
 
     /// Run `f` as one undo step called `label`: the commands it executes push no steps of their
-    /// own, and when it fails the complete session state is put back.
+    /// own, and when it fails the documents stay at their group-start state.
     pub fn grouped<T>(&mut self, label: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.ds()?;
-        let docs = self.docs.clone();
-        let active = self.active;
-        let clipboard = self.clipboard.clone();
-        let prefs = self.prefs.clone();
-        let tool = self.tool.clone();
-        let ui_requests = self.ui_requests.clone();
-        let ui_dark = self.ui_dark;
-        let journal = self.journal.clone();
-        let recent_colors = self.recent_colors.clone();
-        let last_command = self.last_command.clone();
-        let message = self.message.clone();
-        let libraries = self.libraries.clone();
-        let before: Vec<_> = docs
+        let before: Vec<_> = self
+            .docs
             .iter()
-            .map(|ds| (ds.uid, ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.limit))
+            .map(|ds| (ds.uid, ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.undo.len(), ds.history.limit))
             .collect();
+        let active = self.active;
+        let journal_len = self.journal.len();
 
         // The steps inside are dropped again below, so they mustn't push the oldest ones out.
         for ds in &mut self.docs {
             ds.history.limit = usize::MAX;
         }
-        for (uid, _, _, _, _) in &before {
+        for (uid, _, _, _, _, _) in &before {
             self.live_hold(*uid, true);
         }
         let result = f(self);
-        for (uid, _, _, _, _) in &before {
+        for (uid, _, _, _, _, _) in &before {
             self.live_hold(*uid, false);
         }
 
         if result.is_err() {
-            self.docs = docs;
+            self.docs.retain(|ds| before.iter().any(|(uid, _, _, _, _, _)| *uid == ds.uid));
+            for (uid, doc, selection, page, undo_len, limit) in &before {
+                if let Some(ds) = self.docs.iter_mut().find(|ds| ds.uid == *uid) {
+                    ds.doc = doc.clone();
+                    ds.selection = selection.clone();
+                    ds.page = *page;
+                    ds.history.undo.truncate(*undo_len);
+                    ds.history.limit = *limit;
+                }
+            }
             self.active = active;
-            self.clipboard = clipboard;
-            self.prefs = prefs;
-            self.tool = tool;
-            self.ui_requests = ui_requests;
-            self.ui_dark = ui_dark;
-            self.journal = journal;
-            self.recent_colors = recent_colors;
-            self.last_command = last_command;
-            self.message = message;
-            self.libraries = libraries;
+            self.journal.truncate(journal_len);
             return result;
         }
 
         let changed: Vec<_> = before
             .iter()
-            .filter_map(|(uid, doc, selection, page, _)| {
+            .filter_map(|(uid, doc, selection, page, _, _)| {
                 let ds = self.docs.iter().find(|d| d.uid == *uid)?;
                 (!Arc::ptr_eq(doc, &ds.doc) && ds.interaction.is_none())
                     .then(|| (*uid, doc.clone(), selection.clone(), *page))
             })
             .collect();
         for ds in &mut self.docs {
-            if let Some((_, _, _, _, limit)) = before.iter().find(|before| before.0 == ds.uid) {
+            if let Some((_, _, _, _, undo_len, limit)) = before.iter().find(|before| before.0 == ds.uid) {
                 ds.history.limit = *limit;
-                ds.history.undo.truncate(
-                    docs.iter()
-                        .find(|original| original.uid == ds.uid)
-                        .map_or(0, |original| original.history.undo.len()),
-                );
+                ds.history.undo.truncate(*undo_len);
             }
         }
         for (uid, doc, selection, page) in changed {
@@ -1527,7 +1514,7 @@ mod plugin_directory_tests;
 #[cfg(test)]
 mod plugin_panels_tests;
 #[cfg(test)]
-mod plugins_tests;
+pub(crate) mod plugins_tests;
 #[cfg(test)]
 mod progressive_blur_tests;
 #[cfg(test)]
@@ -1592,6 +1579,8 @@ mod styles_behaviour_tests;
 mod svg_import_tests;
 #[cfg(test)]
 mod templates_tests;
+#[cfg(test)]
+mod batch_rollback_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
