@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use egui::{Align2, Color32, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use figcraft_doc::*;
-use figcraft_engine::cmd::file::export_jobs;
+use figcraft_engine::cmd::file::{export_area, export_jobs};
 use serde_json::{Value, json};
 
 use crate::FigApp;
@@ -268,7 +268,7 @@ fn preview(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId) {
         }
         _ => {
             let px = ui.available_width() * ui.ctx().pixels_per_point();
-            let tex = crate::assets_panel::thumbnail(ui.ctx(), doc, id, px);
+            let tex = preview_thumbnail(ui.ctx(), doc, id, px);
             ui.data_mut(|d| d.insert_temp(cache_id, PreviewTex { id, revision, at: now, tex: tex.clone() }));
             tex
         }
@@ -285,6 +285,27 @@ fn preview(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId) {
         let img = Rect::from_center_size(frame.center(), vec2(tw * k, th * k));
         ui.painter().image(tex.id(), img, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
+}
+
+fn preview_thumbnail(ctx: &egui::Context, doc: &Document, id: NodeId, px: f32) -> Option<egui::TextureHandle> {
+    let node = doc.node(id)?;
+    if !matches!(node.kind, NodeKind::Slice) {
+        return crate::assets_panel::thumbnail(ctx, doc, id, px);
+    }
+    let pix = slice_preview_pixmap(doc, id, px)?;
+    let img = crate::render_worker::screen_image(&pix, doc.color_profile);
+    Some(ctx.load_texture(format!("slice-preview-{}", id.0), img, egui::TextureOptions::LINEAR))
+}
+
+pub(crate) fn slice_preview_pixmap(doc: &Document, id: NodeId, px: f32) -> Option<figcraft_render::Pixmap> {
+    let area = export_area(doc, &[id], &ExportSetting::default())?;
+    let page = doc.node(doc.page_of(id)?)?;
+    let side = area.width().max(area.height());
+    if !(side.is_finite() && side > 0.0) {
+        return None;
+    }
+    let scale = (f64::from(px) / side).min(2.0);
+    figcraft_render::render_area(doc, &page.children, area, scale)
 }
 
 /// A full-width outlined button row; true when clicked.

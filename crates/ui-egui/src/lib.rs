@@ -78,6 +78,8 @@ mod cursors_tests;
 #[cfg(test)]
 mod dev_mode_tests;
 #[cfg(test)]
+mod export_panel_tests;
+#[cfg(test)]
 mod field_tests;
 #[cfg(test)]
 mod frame_label_tests;
