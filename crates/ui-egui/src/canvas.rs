@@ -973,6 +973,13 @@ fn overlays(app: &FigApp, painter: &egui::Painter, t: &Tokens) -> Vec<(NodeId, [
         if app.session.tool.tool == ToolId::Pencil {
             painter.add(Shape::line(pts, stroke(t.text, 2.0)));
         } else {
+            // Bezier handles being pulled out, under the anchors.
+            for [ax, ay, hx, hy] in &ov.pen_handles {
+                let (a, h) = (app.to_screen(*ax, *ay), app.to_screen(*hx, *hy));
+                painter.line_segment([a, h], stroke(ACCENT, 1.0));
+                painter.circle_filled(h, 3.5, Color32::WHITE);
+                painter.circle_stroke(h, 3.5, stroke(ACCENT, 1.0));
+            }
             for p in &pts {
                 painter.circle_filled(*p, 3.5, Color32::WHITE);
                 painter.circle_stroke(*p, 3.5, stroke(ACCENT, 1.0));
@@ -1149,6 +1156,12 @@ fn vector_overlay(
     }
     if !points {
         return;
+    }
+    for [vx, vy, hx, hy] in &o.pen_handles {
+        let (v, e) = (sp(&[*vx, *vy]), sp(&[*hx, *hy]));
+        painter.line_segment([v, e], stroke(ACCENT, 1.0));
+        painter.circle_filled(e, 3.5, Color32::WHITE);
+        painter.circle_stroke(e, 3.5, stroke(ACCENT, 1.0));
     }
     for h in &o.handles {
         let (v, e) = (sp(&h.vertex), sp(&h.handle));

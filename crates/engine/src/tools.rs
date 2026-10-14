@@ -265,6 +265,9 @@ pub struct Overlay {
     pub cursor: Cursor,
     /// Pen tool: the in-progress path's anchor points and the rubber band to the pointer.
     pub pen: Vec<[f64; 2]>,
+    /// Pen tool: Bezier handle lines (anchor x, y, handle x, y) of the point being placed and the
+    /// out handle of the one before it, drawn while a drag pulls them out.
+    pub pen_handles: Vec<[f64; 4]>,
     pub rubber: Option<[f64; 4]>,
     /// Frame/section the pointer is drawing or dropping into (highlighted).
     pub drop_target: Option<NodeId>,
@@ -372,6 +375,8 @@ pub(crate) enum Gesture {
     },
     PenDrag {
         anchor: Point,
+        /// The point before it is a corner (no out handle): the drag gives it one too.
+        corner_before: bool,
     },
     /// Vector edit mode gestures (handled in `vectoredit`).
     Vector(crate::vectoredit::VGesture),
@@ -1390,13 +1395,23 @@ impl Session {
                 Ok(())
             }
             Gesture::Vector(_) | Gesture::ShapeBuild { .. } | Gesture::Origin => Ok(()),
-            Gesture::PenDrag { anchor } => {
+            Gesture::PenDrag { anchor, corner_before } => {
+                // Under 2 screen pixels is a click's wobble, not a drag (as in vector edit mode).
                 let out = ev.p() - *anchor;
+                let out = if out.hypot() * ev.zoom < 2.0 { Vec2::ZERO } else { out };
                 if let Some(pen) = self.tool.pen.as_mut()
                     && let Some(last) = pen.points.last_mut()
                 {
                     last.2 = out;
                     last.1 = -out;
+                    // A corner before it gets an out handle a third of the way to the new point's
+                    // in handle, so the segment leaves it heading into the curve.
+                    if *corner_before
+                        && let Some(k) = pen.points.len().checked_sub(2)
+                        && let Some(prev) = pen.points.get_mut(k)
+                    {
+                        prev.2 = if out.hypot() < 1e-9 { Vec2::ZERO } else { corner_handle(prev.0, *anchor - out) };
+                    }
                 }
                 self.pen_update()?;
                 Ok(())
@@ -1976,8 +1991,11 @@ impl Session {
             let ang = (v.atan2() / (std::f64::consts::PI / 4.0)).round() * std::f64::consts::PI / 4.0;
             p = *last + Vec2::from_angle(ang) * v.hypot();
         }
+        let corner_before = pen.points.last().is_some_and(|(_, _, o)| o.hypot() < 1e-9);
         pen.points.push((p, Vec2::ZERO, Vec2::ZERO));
-        self.tool.gesture = Gesture::PenDrag { anchor: p };
+        // The hover's rubber band ends here: the segment itself shows while its handles are dragged.
+        self.tool.overlay.rubber = None;
+        self.tool.gesture = Gesture::PenDrag { anchor: p, corner_before };
         self.pen_update()
     }
 
@@ -1985,6 +2003,7 @@ impl Session {
     fn pen_update(&mut self) -> Result<()> {
         let Some(pen) = self.tool.pen.clone() else { return Ok(()) };
         self.tool.overlay.pen = pen.points.iter().map(|(p, _, _)| [p.x, p.y]).collect();
+        self.tool.overlay.pen_handles = pen_handle_lines(&pen.points);
         if pen.points.len() < 2 {
             if let Ok(ds) = self.ds_mut() {
                 ds.revision += 1;
@@ -2067,6 +2086,7 @@ impl Session {
     pub fn pen_finish(&mut self) -> Result<()> {
         let pen = self.tool.pen.take();
         self.tool.overlay.pen.clear();
+        self.tool.overlay.pen_handles.clear();
         self.tool.overlay.rubber = None;
         self.tool.gesture = Gesture::None;
         if pen.as_ref().is_some_and(|p| p.id.is_some()) {
@@ -2286,6 +2306,29 @@ fn shape_hint(doc: &Document, id: NodeId, handle: ShapeHandle, zoom: f64) -> Opt
 
 #[allow(dead_code)]
 fn unused(_: BTreeMap<u8, u8>) {}
+
+/// The out handle the pen gives a corner point `from` when the next point is dragged into a
+/// curve: a third of the way to that point's in handle tip `to` (as the incumbent draws it).
+pub(crate) fn corner_handle(from: Point, to: Point) -> Vec2 {
+    let h = (to - from) / 3.0;
+    if h.x.is_finite() && h.y.is_finite() { h } else { Vec2::ZERO }
+}
+
+/// The pen's handle lines (anchor, handle end; page space): both handles of its last point and the
+/// out handle of the point before it. Zero-length handles are left out.
+fn pen_handle_lines(points: &[(Point, Vec2, Vec2)]) -> Vec<[f64; 4]> {
+    let line = |p: Point, h: Vec2| (h.hypot() > 1e-9 && h.x.is_finite() && h.y.is_finite()).then_some([p.x, p.y, p.x + h.x, p.y + h.y]);
+    let n = points.len();
+    let mut out = Vec::new();
+    if let Some((p, _, o)) = n.checked_sub(2).and_then(|k| points.get(k)) {
+        out.extend(line(*p, *o));
+    }
+    if let Some((p, i, o)) = points.last() {
+        out.extend(line(*p, *i));
+        out.extend(line(*p, *o));
+    }
+    out
+}
 
 /// An end point of a selected open vector within `tol` of page point `p`: (layer, point).
 fn selected_end_at(doc: &Document, sel: &[NodeId], p: Point, tol: f64) -> Option<(NodeId, usize)> {

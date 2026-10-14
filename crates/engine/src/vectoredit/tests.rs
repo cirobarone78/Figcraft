@@ -106,6 +106,32 @@ fn pen_drag_makes_a_smooth_point() {
 }
 
 #[test]
+fn pen_drag_shows_the_handles_on_both_sides_of_the_new_segment() {
+    let mut s = Session::new();
+    let id = rect(&mut s);
+    ex(&mut s, "vector.edit.tool", json!({"tool": "pen"}));
+    click(&mut s, 100.0, 0.0);
+    drag(&mut s, (150.0, 50.0), (150.0, 80.0));
+    // The corner it came from grows a handle a third of the way to the new in handle's tip.
+    let n = net(&s, id);
+    let (seg, start) = n.incident(vertex_at(&n, 150.0, 50.0))[0];
+    let h = n.handle(seg, !start).unwrap();
+    assert!((h.0 - 50.0 / 3.0).abs() < 1e-6 && (h.1 - 20.0 / 3.0).abs() < 1e-6, "the corner's handle: {h:?}");
+    // Mid-drag from the next point: the previous point's out handle (shaping the new segment) and
+    // the new point's out handle, besides its in handle (drawn with the point's own handles).
+    s.pointer(&ev(PointerKind::Down, 250.0, 50.0)).unwrap();
+    s.pointer(&ev(PointerKind::Move, 250.0, 35.0)).unwrap();
+    s.pointer(&ev(PointerKind::Move, 250.0, 20.0)).unwrap();
+    let o = super::overlay(s.doc().unwrap(), &ve(&s)).unwrap();
+    assert_eq!(o.pen_handles, vec![[150.0, 50.0, 150.0, 80.0], [250.0, 50.0, 250.0, 20.0]]);
+    assert!(o.handles.iter().any(|h| h.vertex == [250.0, 50.0] && h.handle == [250.0, 80.0]), "the mirrored in handle: {:?}", o.handles);
+    s.pointer(&ev(PointerKind::Up, 250.0, 20.0)).unwrap();
+    // Other tools draw no pen lines.
+    ex(&mut s, "vector.edit.tool", json!({"tool": "move"}));
+    assert!(super::overlay(s.doc().unwrap(), &ve(&s)).unwrap().pen_handles.is_empty());
+}
+
+#[test]
 fn bend_tool_smooths_and_sharpens_points() {
     let mut s = Session::new();
     let id = rect(&mut s);

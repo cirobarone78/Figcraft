@@ -315,6 +315,9 @@ pub struct EditOverlay {
     pub selected_segments: Vec<usize>,
     pub selected_handles: Vec<(usize, bool)>,
     pub anchor: Option<usize>,
+    /// Pen tool: handle lines (point x, y, handle x, y) drawn but not hit-tested: the open end's
+    /// out handle the next segment starts with, and the far ends' handles of the segments into it.
+    pub pen_handles: Vec<[f64; 4]>,
 }
 
 /// Convert a shape to an editable vector (keeps paints, transform and look).
@@ -479,6 +482,26 @@ pub fn overlay(doc: &Document, ve: &VectorEdit) -> Option<EditOverlay> {
             Some(HandleLine { seg: si, start, vertex: p(v.point()), handle: p(Point::new(v.x + t.0, v.y + t.1)) })
         })
         .collect();
+    let mut pen_handles = Vec::new();
+    if ve.tool == VTool::Pen
+        && let Some((a, av)) = ve.anchor.and_then(|a| Some((a, net.vertices.get(a)?)))
+    {
+        let mut line = |v: Point, t: (f64, f64)| {
+            if t != (0.0, 0.0) && t.0.is_finite() && t.1.is_finite() {
+                let (v, h) = (p(v), p(Point::new(v.x + t.0, v.y + t.1)));
+                pen_handles.push([v[0], v[1], h[0], h[1]]);
+            }
+        };
+        for (si, start) in net.incident(a) {
+            let far = net.segments.get(si).and_then(|s| net.vertices.get(if start { s.b } else { s.a }));
+            if let (Some(fv), Some(t)) = (far, net.handle(si, !start)) {
+                line(fv.point(), t);
+            }
+        }
+        if let Some(t) = ve.pen_out {
+            line(av.point(), t);
+        }
+    }
     Some(EditOverlay {
         segments,
         vertices,
@@ -487,6 +510,7 @@ pub fn overlay(doc: &Document, ve: &VectorEdit) -> Option<EditOverlay> {
         selected_segments: ve.segments.clone(),
         selected_handles: ve.handles.clone(),
         anchor: ve.anchor,
+        pen_handles,
     })
 }
 

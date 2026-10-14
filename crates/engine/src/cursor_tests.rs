@@ -244,6 +244,47 @@ fn the_pen_shows_what_a_click_would_do() {
 }
 
 #[test]
+fn the_pen_shows_the_handles_a_drag_pulls_out() {
+    let mut s = Session::new();
+    s.set_tool(ToolId::Pen);
+    // A click: a corner point, no handles.
+    s.pointer(&ev(PointerKind::Down, (100.0, 100.0), NONE)).unwrap();
+    s.pointer(&ev(PointerKind::Up, (100.0, 100.0), NONE)).unwrap();
+    assert!(s.tool.overlay.pen_handles.is_empty(), "a click pulls out no handles");
+    // Hovering shows the rubber band to the pointer; pressing ends it (no stale straight line).
+    hover(&mut s, (200.0, 100.0), NONE);
+    assert!(s.tool.overlay.rubber.is_some(), "the rubber band while hovering");
+    // A drag from the next point: its handles, mirrored either side of it.
+    s.pointer(&ev(PointerKind::Down, (200.0, 100.0), NONE)).unwrap();
+    assert_eq!(s.tool.overlay.rubber, None, "no rubber band while dragging the handles");
+    s.pointer(&ev(PointerKind::Move, (240.0, 130.0), NONE)).unwrap();
+    // The corner before it grows an out handle a third of the way to the new in handle's tip.
+    assert_eq!(s.tool.overlay.pen_handles, vec![[100.0, 100.0, 120.0, 90.0], [200.0, 100.0, 160.0, 70.0], [200.0, 100.0, 240.0, 130.0]]);
+    s.pointer(&ev(PointerKind::Up, (240.0, 130.0), NONE)).unwrap();
+    // The next point: the previous point's out handle still shows (it shapes the new segment).
+    s.pointer(&ev(PointerKind::Down, (300.0, 200.0), NONE)).unwrap();
+    assert_eq!(s.tool.overlay.pen_handles, vec![[200.0, 100.0, 240.0, 130.0]]);
+    s.pointer(&ev(PointerKind::Up, (300.0, 200.0), NONE)).unwrap();
+    s.escape().unwrap();
+    assert!(s.tool.overlay.pen_handles.is_empty(), "finishing the path clears them");
+}
+
+#[test]
+fn a_pen_click_that_wobbles_a_pixel_is_still_a_click() {
+    let mut s = Session::new();
+    s.set_tool(ToolId::Pen);
+    // A real click: the mouse moves a pixel between press and release.
+    s.pointer(&ev(PointerKind::Down, (100.0, 100.0), NONE)).unwrap();
+    s.pointer(&ev(PointerKind::Move, (101.0, 100.0), NONE)).unwrap();
+    s.pointer(&ev(PointerKind::Up, (101.0, 100.0), NONE)).unwrap();
+    assert!(s.tool.overlay.pen_handles.is_empty(), "no handle pulled out");
+    // So it is still a corner, and dragging out the next point gives it a handle.
+    s.pointer(&ev(PointerKind::Down, (200.0, 100.0), NONE)).unwrap();
+    s.pointer(&ev(PointerKind::Move, (240.0, 130.0), NONE)).unwrap();
+    assert_eq!(s.tool.overlay.pen_handles.first(), Some(&[100.0, 100.0, 120.0, 90.0]));
+}
+
+#[test]
 fn vector_edit_mode_shows_each_tool_and_modifier() {
     let mut s = Session::new();
     let path = id(&ex(&mut s, "vector.create", json!({"points": [[100, 100], [300, 100], [300, 300]], "closed": false})));

@@ -139,6 +139,14 @@ fn apply_pen(net: &mut VectorNetwork, plan: PenPlan, out: Option<(f64, f64)>, dr
             net.vertices.push(Vertex::new(at.x, at.y));
             let v = net.vertices.len() - 1;
             if let Some(f) = from {
+                // From a corner, a dragged point gives the corner a handle into the curve too.
+                let out = match (drag, net.vertices.get(f)) {
+                    (Some(d), Some(fv)) if out == (0.0, 0.0) && d.hypot() > 1e-9 => {
+                        let h = crate::tools::corner_handle(fv.point(), at - d);
+                        (h.x, h.y)
+                    }
+                    _ => out,
+                };
                 ops::connect(net, f, v, out, back);
             }
             if drag.is_some()
