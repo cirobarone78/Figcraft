@@ -1168,27 +1168,30 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
 
 ### Dev Mode
 
-- **Component code:** `inspect.code {id, language: react|swiftui|compose}` on a component, a
-  component set or a variant writes the component as a reusable unit: React (TSX) with a props
-  interface, SwiftUI with a `View` struct, Compose with a `@Composable` function. Its component
-  properties are the parameters, with their defaults: variant properties become string unions
-  (React) or enums, booleans become flags around the layers they show, text properties strings,
-  instance swaps views (`React.ReactNode`, `AnyView`, a composable lambda) and slots optional
-  content. Every variant of a set shares one definition; in React the other variants' differences
-  become CSS rules on `data-*` attributes. On an instance (or a layer tree containing instances)
-  each instance is a call passing only the values it changes, e.g. `<Button state="Hover"
-  label="Buy" />`, `Button(state: .hover, label: "Buy")`, `Button(state = ButtonState.Hover, label =
-  "Buy")`. Names are escaped and unique (keywords get a suffix, `default` → `defaultValue`; names
-  that would shadow framework types get one too, `Text` → `TextComponent`). `inspect.componentCode
+- **Component code:** `inspect.code {id, language: react|leptos|swiftui|compose}` on a component,
+  a component set or a variant writes the component as a reusable unit: React (TSX) with a props
+  interface, Leptos with a `#[component]` function (`#[prop]` defaults, `view!` markup), SwiftUI
+  with a `View` struct, Compose with a `@Composable` function. Its component properties are the
+  parameters, with their defaults: variant properties become string unions (React) or enums,
+  booleans become flags around the layers they show, text properties strings, instance swaps views
+  (`React.ReactNode`, Leptos `ViewFn`, `AnyView`, a composable lambda) and slots optional content.
+  Every variant of a set shares one definition; in React and Leptos the other variants'
+  differences become CSS rules on `data-*` attributes. On an instance (or a layer tree containing
+  instances) each instance is a call passing only the values it changes, e.g. `<Button
+  state="Hover" label="Buy" />`, `<Button state=ButtonState::Hover label="Buy" />`, `Button(state:
+  .hover, label: "Buy")`, `Button(state = ButtonState.Hover, label = "Buy")`. Names are escaped and
+  unique (keywords get a suffix, `default` → `defaultValue`, Rust's `type` → `type_`; Leptos names
+  are snake_case; names that would shadow framework types get one too, `Text` → `TextComponent`). `inspect.componentCode
   {id?, language?}` returns the parts: `{component, name, set, properties: [{name, param, type,
   default, value? (instances)}], definition, usage? (instances)}`.
 - **Code connect:** link a component (a variant links its set) to the code component it is built
-  as, per language (`react`, `swiftui`, `compose`): `codeConnect.set {id?, language?, importPath?,
+  as, per language (`react`, `leptos`, `swiftui`, `compose`): `codeConnect.set {id?, language?, importPath?,
   name?, template?}` (undoable; fields left out keep their value; the defaults are the generated
   name and a call passing every property) → `{component, language, code, unknown}`. Templates are
   text, never executed: `{property}` (its name or parameter name) is the instance's value escaped
-  for the language (React keeps JSX's braces, so `size={size}` gives `size="Large"` and
-  `disabled={disabled}` gives `disabled={true}`), `{property ? "a" : "b"}` inserts one of two
+  for the language (React and Leptos keep the markup's braces, so `size={size}` gives
+  `size="Large"` and `disabled={disabled}` gives `disabled={true}`; Leptos imports with `use
+  <importPath>::<name>;`), `{property ? "a" : "b"}` inserts one of two
   strings, any other `{…}` stays as written (`unknown` lists placeholder names that aren't
   properties). Then `inspect.code` on an instance or the component returns the import line and the
   snippet instead of generated code (`connected: true`), connected instances inside a generated
