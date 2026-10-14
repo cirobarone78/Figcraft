@@ -881,7 +881,7 @@ pub fn checkbox(ui: &mut Ui, on: bool, label: &str) -> bool {
     let b = Rect::from_min_size(pos2(rect.min.x, rect.center().y - 7.0), vec2(14.0, 14.0));
     if on {
         ui.painter().rect_filled(b, CornerRadius::same(3), t.accent);
-        icons::paint(ui.painter(), b.shrink(1.5), Icon::Check, Color32::WHITE);
+        icons::paint(ui.painter(), b.shrink(1.5), Icon::Check, t.on_accent);
     } else {
         ui.painter().rect_stroke(b, CornerRadius::same(3), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
     }
@@ -915,8 +915,8 @@ pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Respons
     a11y::button(&resp, label);
     let hot = enabled && resp.hovered();
     let (fill, text) = match (primary, hot) {
-        (true, false) => (t.accent, Color32::WHITE),
-        (true, true) => (t.accent_hover, Color32::WHITE),
+        (true, false) => (t.accent, t.on_accent),
+        (true, true) => (t.accent_hover, t.on_accent),
         (false, false) => (Color32::TRANSPARENT, t.text),
         (false, true) => (t.hover, t.text),
     };

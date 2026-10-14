@@ -31,3 +31,4 @@ toml = "1"
 
 [dev-dependencies]
 wat = { workspace = true }
+egui_kittest = { version = "=0.36.2", features = ["wgpu"] }

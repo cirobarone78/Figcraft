@@ -226,7 +226,8 @@ fn pages(app: &mut FigApp, ui: &mut Ui) {
             // A divider is a line between pages: it opens nothing and takes no layers.
             ui.painter().line_segment([pos2(r.min.x + 10.0, r.center().y), pos2(r.max.x - 10.0, r.center().y)], Stroke::new(1.0, t.border));
         } else if resp.hovered() || id == cur {
-            ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
+            let fill = if t.dark && id == cur { t.selected_row } else { t.hover };
+            ui.painter().rect_filled(r, CornerRadius::same(5), fill);
         }
         if dragging.is_some()
             && id != cur

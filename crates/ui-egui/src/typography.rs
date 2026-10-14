@@ -1095,9 +1095,9 @@ pub(crate) fn font_picker(ui: &mut Ui, current: Option<&str>, just_opened: bool)
                 PickRow::Family(f) => {
                     let hovered = resp.hovered();
                     if hovered {
-                        ui.painter().rect_filled(rect, CornerRadius::same(5), t.accent);
+                        ui.painter().rect_filled(rect, CornerRadius::same(5), if t.dark { t.selected_row } else { t.accent });
                     }
-                    let col = if hovered { Color32::WHITE } else { t.text };
+                    let col = if hovered && !t.dark { Color32::WHITE } else { t.text };
                     if current.is_some_and(|c| c.eq_ignore_ascii_case(f)) {
                         icons::paint(
                             ui.painter(),
