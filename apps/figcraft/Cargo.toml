@@ -14,6 +14,9 @@ workspace = true
 figcraft-engine = { workspace = true }
 figcraft-ui-egui = { workspace = true }
 figcraft-collab-net = { workspace = true }
+# The CraftHub v3 client path (default off): links the adapter; the session wiring lands
+# behind this flag in the pilot follow-up. Nothing changes until it is switched on.
+figcraft-hub = { workspace = true, optional = true }
 figcraft-format = { workspace = true }
 figcraft-text = { workspace = true }
 egui = { workspace = true }
@@ -30,6 +33,11 @@ env_logger = { version = "0.11", default-features = false, features = ["auto-col
 # (GlobalizationPreferences.Languages) and controllers for prototypes (Gaming.Input.Gamepad).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", default-features = false, features = ["UI_ViewManagement", "System_UserProfile", "Foundation_Collections", "Gaming_Input"] }
+
+[features]
+# The CraftHub v3 client path (spec §18.4 row 1): default off, flipped only after the
+# simulation suite runs green in CI for a full week.
+crafthub = ["dep:figcraft-hub"]
 
 [dev-dependencies]
 wat = { workspace = true }

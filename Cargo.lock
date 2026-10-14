@@ -856,6 +856,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-collab"
+version = "0.1.0"
+source = "git+https://github.com/hasan-sdaif/crafthub?rev=1e96a9fb9b8c82ac6ec31818608967b66ef7a527#1e96a9fb9b8c82ac6ec31818608967b66ef7a527"
+dependencies = [
+ "postcard",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1416,6 +1427,7 @@ dependencies = [
  "figcraft-collab-net",
  "figcraft-engine",
  "figcraft-format",
+ "figcraft-hub",
  "figcraft-text",
  "figcraft-ui-egui",
  "image",
@@ -1549,6 +1561,17 @@ version = "0.6.0"
 dependencies = [
  "kurbo",
  "serde",
+]
+
+[[package]]
+name = "figcraft-hub"
+version = "0.6.0"
+dependencies = [
+ "craft-collab",
+ "figcraft-color",
+ "figcraft-doc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
