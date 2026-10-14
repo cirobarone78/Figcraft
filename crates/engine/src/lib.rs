@@ -1066,24 +1066,57 @@ impl Session {
     }
 
     /// Run `f` as one undo step called `label`: the commands it executes push no steps of their
-    /// own, and when it fails the document, selection, page and history are put back.
+    /// own, and when it fails the documents stay at their group-start state.
     pub fn grouped<T>(&mut self, label: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let ds = self.ds_mut()?;
-        let (before, sel, page, saved_len, uid) = (ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.undo.len(), ds.uid);
+        self.ds()?;
+        let before: Vec<_> =
+            self.docs.iter().map(|ds| (ds.uid, ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.undo.len(), ds.history.limit)).collect();
+        let active = self.active;
+        let journal_len = self.journal.len();
+
         // The steps inside are dropped again below, so they mustn't push the oldest ones out.
-        let limit = std::mem::replace(&mut ds.history.limit, usize::MAX);
-        self.live_hold(uid, true);
+        for ds in &mut self.docs {
+            ds.history.limit = usize::MAX;
+        }
+        for (uid, _, _, _, _, _) in &before {
+            self.live_hold(*uid, true);
+        }
         let result = f(self);
-        self.live_hold(uid, false);
-        let Some(ds) = self.docs.iter_mut().find(|d| d.uid == uid) else { return result };
-        ds.history.limit = limit;
-        ds.history.undo.truncate(saved_len);
+        for (uid, _, _, _, _, _) in &before {
+            self.live_hold(*uid, false);
+        }
+
         if result.is_err() {
-            ds.doc = before;
-            ds.selection = sel;
-            ds.page = page;
-        } else if !Arc::ptr_eq(&before, &ds.doc) {
-            self.record(uid, Some(label), before, sel, page);
+            self.docs.retain(|ds| before.iter().any(|(uid, _, _, _, _, _)| *uid == ds.uid));
+            for (uid, doc, selection, page, undo_len, limit) in &before {
+                if let Some(ds) = self.docs.iter_mut().find(|ds| ds.uid == *uid) {
+                    ds.doc = doc.clone();
+                    ds.selection = selection.clone();
+                    ds.page = *page;
+                    ds.history.undo.truncate(*undo_len);
+                    ds.history.limit = *limit;
+                }
+            }
+            self.active = active;
+            self.journal.truncate(journal_len);
+            return result;
+        }
+
+        let changed: Vec<_> = before
+            .iter()
+            .filter_map(|(uid, doc, selection, page, _, _)| {
+                let ds = self.docs.iter().find(|d| d.uid == *uid)?;
+                (!Arc::ptr_eq(doc, &ds.doc) && ds.interaction.is_none()).then(|| (*uid, doc.clone(), selection.clone(), *page))
+            })
+            .collect();
+        for ds in &mut self.docs {
+            if let Some((_, _, _, _, undo_len, limit)) = before.iter().find(|before| before.0 == ds.uid) {
+                ds.history.limit = *limit;
+                ds.history.undo.truncate(*undo_len);
+            }
+        }
+        for (uid, doc, selection, page) in changed {
+            self.record(uid, Some(label), doc, selection, page);
         }
         result
     }
@@ -1347,6 +1380,8 @@ mod arc_handles_tests;
 #[cfg(test)]
 mod autosave_tests;
 #[cfg(test)]
+mod batch_rollback_tests;
+#[cfg(test)]
 mod binding_lists_tests;
 #[cfg(test)]
 mod booleans_tests;
@@ -1477,7 +1512,7 @@ mod plugin_directory_tests;
 #[cfg(test)]
 mod plugin_panels_tests;
 #[cfg(test)]
-mod plugins_tests;
+pub(crate) mod plugins_tests;
 #[cfg(test)]
 mod progressive_blur_tests;
 #[cfg(test)]
