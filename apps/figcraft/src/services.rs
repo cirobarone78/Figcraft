@@ -131,6 +131,34 @@ fn command_says(program: &str, args: &[&str], want: &str) -> bool {
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == want)
 }
 
+/// Show `path` in the file manager: selected in Finder and Explorer, its folder elsewhere.
+fn reveal(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(path);
+        let mut c = std::process::Command::new("explorer");
+        c.arg(arg);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    // The file manager keeps running; reap it off this thread so it leaves no zombie.
+    let mut child = command.spawn()?;
+    let _ = std::thread::Builder::new().name("figcraft-reveal".into()).spawn(move || child.wait());
+    Ok(())
+}
+
 /// The preferences' file in the config folder.
 const STATE: &str = "state.json";
 
@@ -186,6 +214,11 @@ impl Services for Desktop {
     }
     fn open_url(&mut self, url: &str) {
         let _ = webbrowser::open(url);
+    }
+    fn reveal_path(&mut self, path: &Path) {
+        if let Err(e) = reveal(path) {
+            log::warn!("show in folder: {}: {e}", path.display());
+        }
     }
     fn save_prefs(&mut self, prefs: &Prefs) {
         if let Some(dir) = &self.dir {

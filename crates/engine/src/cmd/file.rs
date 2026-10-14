@@ -37,7 +37,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.openRecent",
             "Open recent",
-            "{path? | index? (into the list), clear? (forget them all)}  opens a recent file; a file that no longer exists is dropped from the list. Returns the list, newest first: {files: [{path, name, exists}]} (opening returns what `file.open` does)",
+            "{path? | index? (into the list), clear? (forget them all), remove? (a path: forget that one)}  opens a recent file; a file that no longer exists is dropped from the list. Returns the list, newest first: {files: [{path, name, exists}]} (opening returns what `file.open` does)",
             false,
             open_recent
         ),
@@ -624,6 +624,9 @@ fn open_recent(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "file.openRecent";
     if p.get("clear").and_then(Value::as_bool) == Some(true) {
         s.prefs.recent_files.clear();
+    }
+    if let Some(gone) = string(p, "remove") {
+        s.prefs.recent_files.retain(|r| *r != gone);
     }
     let path = match (string(p, "path"), num(p, "index")) {
         (Some(path), _) => Some(path),

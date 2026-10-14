@@ -29,6 +29,7 @@ pub mod frame_stats;
 pub mod guides;
 pub mod handles;
 pub mod home;
+pub mod home_recents;
 pub mod i18n;
 pub mod icons;
 pub mod layers;
@@ -82,6 +83,8 @@ mod field_tests;
 mod frame_label_tests;
 #[cfg(test)]
 mod gap_handle_tests;
+#[cfg(test)]
+mod home_recents_tests;
 #[cfg(test)]
 mod home_tests;
 #[cfg(test)]
@@ -180,6 +183,9 @@ pub trait Services {
         None
     }
     fn open_url(&mut self, _url: &str) {}
+    /// Show the file at `path` in the platform's file manager (Finder, Explorer), selected where the
+    /// platform can.
+    fn reveal_path(&mut self, _path: &std::path::Path) {}
     /// The system asks for reduced motion (its accessibility setting).
     fn reduce_motion(&self) -> bool {
         false
@@ -1133,6 +1139,7 @@ impl FigApp {
             "online": online::inspect(self),
             "tabs": self.session.docs.iter().map(|d| json!({"name": d.doc.name, "live": tabs::live_mark(self, d.uid).map(|shared| if shared { "shared" } else { "private" })})).collect::<Vec<_>>(),
             "homeSection": self.ui.home_view.section.id(),
+            "homeRecents": home_recents::inspect(self),
             "dark": self.ui.dark,
             "focus": {"region": self.ui.nav.region.id(), "keyboard": self.ui.nav.keyboard},
             "reduceMotion": self.reduce_motion(),
