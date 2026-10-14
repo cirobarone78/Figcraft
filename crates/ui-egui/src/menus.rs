@@ -648,16 +648,20 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
                             let w = ui.available_width();
                             let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
                             if resp.hovered() || i == 0 {
-                                ui.painter().rect_filled(r, CornerRadius::same(5), if resp.hovered() { ACCENT } else { t.hover });
+                                ui.painter().rect_filled(
+                                    r,
+                                    CornerRadius::same(5),
+                                    if resp.hovered() { if t.dark { t.selected_row } else { ACCENT } } else { t.hover },
+                                );
                             }
-                            let col = if resp.hovered() { Color32::WHITE } else { t.text };
+                            let col = if resp.hovered() && !t.dark { Color32::WHITE } else { t.text };
                             ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label.as_ref(), regular(12.0), col);
                             ui.painter().text(
                                 pos2(r.max.x - 10.0, r.center().y),
                                 Align2::RIGHT_CENTER,
                                 pretty_shortcut(sc),
                                 regular(11.0),
-                                if resp.hovered() { Color32::WHITE } else { t.text_secondary },
+                                if resp.hovered() && !t.dark { Color32::WHITE } else { t.text_secondary },
                             );
                             if resp.clicked() || (enter && i == 0) {
                                 run = Some(id.to_string());

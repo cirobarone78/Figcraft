@@ -9,6 +9,7 @@ description = "FigCraft egui frontend (the Figma-style UI: canvas, toolbar, laye
 workspace = true
 
 [dependencies]
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5d9c5780debff884922aa2a3fab87ba2fc61ac30" }
 figcraft-geom = { workspace = true }
 figcraft-color = { workspace = true }
 figcraft-doc = { workspace = true }
@@ -31,3 +32,4 @@ toml = "1"
 
 [dev-dependencies]
 wat = { workspace = true }
+egui_kittest = { version = "=0.36.2", features = ["wgpu"] }

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use craft_ui::theme::SuiteDarkPalette;
 use egui::{Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,6 +24,7 @@ pub struct Tokens {
     pub field_hover_border: Color32,
     pub accent: Color32,
     pub accent_hover: Color32,
+    pub on_accent: Color32,
     pub accent_text: Color32,
     pub selected_row: Color32,
     pub selected_row_child: Color32,
@@ -72,6 +74,7 @@ impl Tokens {
             field_hover_border: Color32::from_rgb(0xE6, 0xE6, 0xE6),
             accent: ACCENT,
             accent_hover: Color32::from_rgb(0x00, 0x7B, 0xE5),
+            on_accent: Color32::WHITE,
             // 5.2:1 on white, 4.6:1 on selected rows: WCAG AA for text.
             accent_text: Color32::from_rgb(0x00, 0x6B, 0xD1),
             selected_row: Color32::from_rgb(0xE5, 0xF4, 0xFF),
@@ -94,41 +97,45 @@ impl Tokens {
     }
 
     pub fn dark() -> Self {
+        let suite = SuiteDarkPalette::ARTCRAFT;
+        // ArtCraft standard dark UI roles. Keep document/page and semantic colours separate
+        // from the interface chrome.
         Self {
             dark: true,
-            bg: Color32::from_rgb(0x2C, 0x2C, 0x2C),
-            panel: Color32::from_rgb(0x2C, 0x2C, 0x2C),
+            bg: suite.window,
+            panel: suite.panel,
             canvas: Color32::from_rgb(0x1E, 0x1E, 0x1E),
-            border: Color32::from_rgb(0x44, 0x44, 0x44),
-            border_strong: Color32::from_rgb(0x55, 0x55, 0x55),
-            text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-            text_secondary: Color32::from_rgb(0xB3, 0xB3, 0xB3),
-            text_tertiary: Color32::from_rgb(0x75, 0x75, 0x75),
-            icon: Color32::from_rgb(0xF5, 0xF5, 0xF5),
-            icon_secondary: Color32::from_rgb(0xB3, 0xB3, 0xB3),
-            hover: Color32::from_rgb(0x38, 0x38, 0x38),
-            pressed: Color32::from_rgb(0x44, 0x44, 0x44),
-            field: Color32::from_rgb(0x38, 0x38, 0x38),
-            field_hover_border: Color32::from_rgb(0x4D, 0x4D, 0x4D),
-            accent: ACCENT,
-            accent_hover: Color32::from_rgb(0x3D, 0xAD, 0xFF),
-            accent_text: Color32::from_rgb(0x7C, 0xC4, 0xF8),
-            selected_row: Color32::from_rgb(0x2A, 0x45, 0x5C),
-            selected_row_child: Color32::from_rgb(0x2D, 0x37, 0x41),
+            border: suite.border,
+            border_strong: suite.border_strong,
+            text: suite.text,
+            text_secondary: suite.text_secondary,
+            text_tertiary: suite.text_disabled,
+            icon: suite.text,
+            icon_secondary: suite.text_secondary,
+            hover: suite.hover,
+            pressed: suite.pressed,
+            field: suite.input,
+            field_hover_border: suite.border_strong,
+            accent: suite.accent,
+            accent_hover: suite.accent_hover,
+            on_accent: suite.on_accent,
+            accent_text: suite.accent_hover,
+            selected_row: suite.selection,
+            selected_row_child: suite.raised,
             component: Color32::from_rgb(0xD2, 0x7C, 0xFF),
             component_row: Color32::from_rgb(0x3E, 0x30, 0x52),
             danger: Color32::from_rgb(0xF2, 0x48, 0x22),
             success: Color32::from_rgb(0x14, 0xAE, 0x5C),
             warning: Color32::from_rgb(0xFF, 0xCD, 0x29),
             guide: Color32::from_rgb(0xF2, 0x48, 0x22),
-            tab_bar: Color32::from_rgb(0x1E, 0x1E, 0x1E),
-            tab_active: Color32::from_rgb(0x2C, 0x2C, 0x2C),
+            tab_bar: suite.chrome,
+            tab_active: suite.raised,
             shadow: Color32::from_black_alpha(90),
-            menu: Color32::from_rgb(0x1E, 0x1E, 0x1E),
-            menu_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-            menu_hover: ACCENT,
-            menu_dim: Color32::from_rgb(0x9A, 0x9A, 0x9A),
-            focus: ACCENT,
+            menu: suite.panel,
+            menu_text: suite.text,
+            menu_hover: suite.selection,
+            menu_dim: suite.text_disabled,
+            focus: suite.focus,
         }
     }
 
@@ -185,8 +192,8 @@ fn visuals(t: Tokens) -> Visuals {
     v.window_stroke = Stroke::new(1.0, t.border);
     v.window_corner_radius = egui::CornerRadius::same(13);
     v.menu_corner_radius = egui::CornerRadius::same(13);
-    v.selection.bg_fill = t.accent.gamma_multiply(0.3);
-    v.selection.stroke = Stroke::new(1.0, t.accent);
+    v.selection.bg_fill = if t.dark { t.selected_row } else { t.accent.gamma_multiply(0.3) };
+    v.selection.stroke = Stroke::new(1.0, if t.dark { t.text } else { t.accent });
     v.hyperlink_color = t.accent_text;
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open, &mut v.widgets.noninteractive] {
         w.corner_radius = egui::CornerRadius::same(5);
@@ -330,4 +337,113 @@ pub fn set_doc_profile(ctx: &Context, profile: figcraft_color::ColorProfile) {
 pub fn doc_c32(ctx: &Context, c: figcraft_color::Color) -> Color32 {
     let conv = ctx.data(|d| d.get_temp::<figcraft_color::ProfileConversion>(screen_conversion_id()));
     c32(conv.map_or(c, |k| k.apply(c)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Color32, Tokens, visuals};
+
+    #[test]
+    fn shared_dark_adapter_maps_ui_roles() {
+        let suite = super::SuiteDarkPalette::ARTCRAFT;
+        let dark = super::Tokens::dark();
+        for (actual, expected) in [
+            (dark.bg, suite.window),
+            (dark.panel, suite.panel),
+            (dark.border, suite.border),
+            (dark.border_strong, suite.border_strong),
+            (dark.text, suite.text),
+            (dark.text_secondary, suite.text_secondary),
+            (dark.text_tertiary, suite.text_disabled),
+            (dark.icon, suite.text),
+            (dark.icon_secondary, suite.text_secondary),
+            (dark.hover, suite.hover),
+            (dark.pressed, suite.pressed),
+            (dark.field, suite.input),
+            (dark.field_hover_border, suite.border_strong),
+            (dark.accent, suite.accent),
+            (dark.accent_hover, suite.accent_hover),
+            (dark.on_accent, suite.on_accent),
+            (dark.accent_text, suite.accent_hover),
+            (dark.selected_row, suite.selection),
+            (dark.selected_row_child, suite.raised),
+            (dark.tab_bar, suite.chrome),
+            (dark.tab_active, suite.raised),
+            (dark.menu, suite.panel),
+            (dark.menu_text, suite.text),
+            (dark.menu_hover, suite.selection),
+            (dark.menu_dim, suite.text_disabled),
+            (dark.focus, suite.focus),
+        ] {
+            assert_eq!(actual, expected);
+        }
+        let visuals = super::visuals(dark);
+        assert_eq!(visuals.selection.bg_fill, suite.selection);
+        assert_eq!(visuals.selection.stroke.color, suite.selection_text);
+        assert_eq!(dark.canvas, egui::Color32::from_rgb(0x1e, 0x1e, 0x1e));
+        assert_eq!(dark.component, egui::Color32::from_rgb(0xd2, 0x7c, 0xff));
+        assert_eq!(dark.component_row, egui::Color32::from_rgb(0x3e, 0x30, 0x52));
+        assert_eq!(dark.shadow, egui::Color32::from_black_alpha(90));
+        let light = super::Tokens::light();
+        assert_eq!(light.accent, super::ACCENT);
+        assert_eq!(super::visuals(light).selection.bg_fill, light.accent.gamma_multiply(0.3));
+    }
+    #[test]
+    fn standard_dark_roles_keep_document_and_semantic_colours() {
+        let dark = Tokens::dark();
+        let c = Color32::from_rgb;
+        assert_eq!(dark.bg, c(0x12, 0x13, 0x16));
+        assert_eq!(dark.panel, c(0x10, 0x10, 0x14));
+        assert_eq!(dark.tab_bar, c(0x0A, 0x0A, 0x0C));
+        assert_eq!(dark.field, c(0x06, 0x06, 0x07));
+        assert_eq!(dark.hover, c(0x32, 0x33, 0x37));
+        assert_eq!(dark.pressed, c(0x41, 0x42, 0x46));
+        assert_eq!(dark.border, c(0x36, 0x37, 0x3A));
+        assert_eq!(dark.border_strong, c(0x77, 0x78, 0x7C));
+        assert_eq!(dark.text, c(0xF2, 0xF1, 0xEE));
+        assert_eq!(dark.text_secondary, c(0xA6, 0xA6, 0xA8));
+        assert_eq!(dark.accent, c(0x2D, 0x81, 0xFF));
+        assert_eq!(dark.accent_hover, c(0x59, 0xA7, 0xFF));
+        assert_eq!(dark.on_accent, c(0x06, 0x06, 0x07));
+        assert_eq!(dark.focus, c(0x74, 0xAA, 0xFF));
+        assert_eq!(dark.selected_row, c(0x20, 0x3B, 0x65));
+        assert_eq!(visuals(dark).selection.bg_fill, dark.selected_row);
+        assert_eq!(visuals(dark).selection.stroke.color, dark.text);
+        assert_eq!(dark.canvas, c(0x1E, 0x1E, 0x1E));
+        assert_eq!(dark.component, c(0xD2, 0x7C, 0xFF));
+        assert_eq!(dark.danger, c(0xF2, 0x48, 0x22));
+        assert_eq!(dark.success, c(0x14, 0xAE, 0x5C));
+        assert_eq!(dark.warning, c(0xFF, 0xCD, 0x29));
+        assert_eq!(dark.guide, dark.danger);
+    }
+
+    #[test]
+    fn light_selection_and_palette_are_unchanged() {
+        let light = Tokens::light();
+        assert!(!light.dark);
+        assert_eq!(light.bg, Color32::WHITE);
+        assert_eq!(light.accent, super::ACCENT);
+        assert_eq!(light.on_accent, Color32::WHITE);
+        assert_eq!(visuals(light).selection.bg_fill, light.accent.gamma_multiply(0.3));
+        assert_eq!(visuals(light).selection.stroke.color, light.accent);
+    }
+
+    /// Source-UI visual check without a native window. Run with FIGCRAFT_THEME_SHOTS set to a
+    /// local output directory; the ignored test writes one image per theme.
+    #[test]
+    #[ignore]
+    fn render_source_ui_theme_views() {
+        let out = std::path::PathBuf::from(std::env::var("FIGCRAFT_THEME_SHOTS").expect("output directory"));
+        std::fs::create_dir_all(&out).expect("create output directory");
+        for (theme, view) in [("dark", "editor"), ("light", "editor"), ("dark", "preferences"), ("dark", "menu")] {
+            let mut session = figcraft_engine::Session::new();
+            session.prefs.theme = theme.into();
+            let mut app = crate::FigApp::new(session, Box::new(crate::NoServices));
+            app.ui.preferences = view == "preferences";
+            app.ui.main_menu = view == "menu";
+            let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(|ui, app| app.ui(ui), app);
+            harness.run_steps(3);
+            harness.render().expect("render source UI").save(out.join(format!("FigCraft-{theme}-{view}-source.png"))).expect("save source UI");
+        }
+    }
 }

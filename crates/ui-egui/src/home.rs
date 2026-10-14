@@ -199,8 +199,8 @@ fn action_card(ui: &mut Ui, t: &Tokens, icon: Icon, title: &str, sub: &str) -> b
     }
     card_frame(ui, t, r, &resp);
     let ir = Rect::from_min_size(pos2(r.min.x + 16.0, r.center().y - 16.0), vec2(32.0, 32.0));
-    ui.painter().rect_filled(ir, CornerRadius::same(6), ACCENT);
-    icons::paint(ui.painter(), ir.shrink(8.0), icon, Color32::WHITE);
+    ui.painter().rect_filled(ir, CornerRadius::same(6), t.accent);
+    icons::paint(ui.painter(), ir.shrink(8.0), icon, t.on_accent);
     ui.painter().text(pos2(r.min.x + 60.0, r.center().y - 8.0), Align2::LEFT_CENTER, title_shown, semibold(12.0), t.text);
     ui.painter().text(pos2(r.min.x + 60.0, r.center().y + 9.0), Align2::LEFT_CENTER, sub_shown, regular(11.0), t.text_secondary);
     resp.clicked()
