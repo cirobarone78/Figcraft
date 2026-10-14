@@ -141,15 +141,29 @@ pub fn save_state(app: &FigApp) {
 }
 
 /// Write `prefs` to `dir` atomically (a temporary file renamed over the old one: a crash leaves
-/// either version whole).
-fn write_prefs(dir: &Path, prefs: &Prefs) {
+/// either version whole). They hold online owner tokens, so on Unix only the owner can read them.
+pub(crate) fn write_prefs(dir: &Path, prefs: &Prefs) {
     let tmp = dir.join("state.json.tmp");
     let written = std::fs::create_dir_all(dir)
-        .and_then(|()| std::fs::write(&tmp, json!({"prefs": prefs}).to_string()))
+        .and_then(|()| write_private(&tmp, json!({"prefs": prefs}).to_string().as_bytes()))
         .and_then(|()| std::fs::rename(&tmp, dir.join(STATE)));
     if let Err(e) = written {
         log::warn!("preferences: couldn't save them in {}: {e}", dir.display());
     }
+}
+
+/// Write `bytes` to `path`, owner read/write only on Unix from before the first byte (a leftover
+/// file from a crash is narrowed too: the mode given at open only applies to new files).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let mut f = o.open(path)?;
+    #[cfg(unix)]
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    f.write_all(bytes)
 }
 
 impl Services for Desktop {
