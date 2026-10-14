@@ -116,6 +116,8 @@ mod live_text_tests;
 #[cfg(test)]
 mod online_tests;
 #[cfg(test)]
+mod open_issues_tests;
+#[cfg(test)]
 mod panel_reorder_tests;
 #[cfg(test)]
 mod panel_width_tests;
@@ -741,7 +743,7 @@ impl FigApp {
                 "dialog.unsaved" => self.toast(i18n::tr("This file has unsaved changes")),
                 "dialog.plugins" => self.ui.plugins_window = true,
                 "dialog.cursorChat" => live::open_chat(self),
-                "window.new" | "window.focus" => self.window_requests.push(r),
+                "window.new" | "window.focus" | "window.fullscreen" => self.window_requests.push(r),
                 _ => {}
             }
         }

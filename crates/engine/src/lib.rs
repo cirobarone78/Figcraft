@@ -1505,6 +1505,8 @@ mod nested_override_tests;
 #[cfg(test)]
 mod online_tests;
 #[cfg(test)]
+mod open_issues_tests;
+#[cfg(test)]
 mod outline_options_tests;
 #[cfg(test)]
 mod paint_reorder_tests;
