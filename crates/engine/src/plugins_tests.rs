@@ -12,7 +12,7 @@ use figcraft_doc::NodeId;
 /// What a test plugin does when a call is refused: fail the run (status 1), or carry on and report
 /// the refusal as its output.
 #[derive(Clone, Copy, PartialEq)]
-enum OnRefusal {
+pub(crate) enum OnRefusal {
     Fail,
     Report,
 }
@@ -26,7 +26,7 @@ pub(crate) fn lit(s: &str) -> String {
 
 /// A module that reads the selection, makes `calls` in order and outputs the selection it read
 /// (or the first refusal). `tail` runs after the calls (an endless loop, a trap…).
-fn script(calls: &[(&str, Value)], on_refusal: OnRefusal, tail: &str) -> Vec<u8> {
+pub(crate) fn script(calls: &[(&str, Value)], on_refusal: OnRefusal, tail: &str) -> Vec<u8> {
     let mut data = String::new();
     let mut body = String::from("(local.set $sel (call $reply_read (i32.const 60000) (call $selection)))\n");
     let mut at = 0usize;

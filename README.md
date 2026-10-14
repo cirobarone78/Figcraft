@@ -251,6 +251,8 @@ Fonts for the UI and the Text tool come from [craft-fonts](https://github.com/st
 git clone https://github.com/storytold/craft-fonts ../craft-fonts
 ```
 
+If you clone it after a first build, run `cargo clean -p figcraft-text` once so the next build embeds the fonts.
+
 **Start from a template.** The home screen's Templates tab has eight starter files (a mobile app, a landing page, a dashboard, a design system starter, a wireframe kit, social post sizes, presentation slides and an icon set starter), also under File ▸ New from template…. They are built in code from original, synthetic content, so scripts and agents can open them too: `file.newFromTemplate {template}` ([`docs/mcp.md`](docs/mcp.md#starter-templates)).
 
 For the web build, install [trunk](https://trunkrs.dev/) and run `cargo xtask wasm`.
