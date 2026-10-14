@@ -195,7 +195,9 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 - **Missing:** GPU rendering of the canvas. FigCraft renders with tiny-skia on the CPU (banded,
   parallel, retained) and shows the image through wgpu. A new zoom can't reuse the retained
   image; when renders from scratch take a frame or more, the whole view is previewed with a
-  sixteenth of the pixels first, then refined.
+  sixteenth of the pixels first, then refined. With no measure to go by (the first render, another
+  page, a zoom after quick renders), a watchdog thread previews any such render still running
+  after 12 ms (desktop only; the browser renders inline).
 - **Evidence (measured, `cargo xtask bench`):** a 50k-layer page ~8 ms zoomed out with levels of
   detail, single-layer edits at 10k layers ~0.2 ms; full 1440×900 renders 7–15 ms at 10k layers.
   Heavy effects (glass, background blur, noise) and 4K/5K canvases at 2x are where CPU time grows.
