@@ -653,6 +653,11 @@ pub struct Clipboard {
     /// The document copied from (pastes into other files follow its mains) and its file path.
     pub source: Option<Arc<Document>>,
     pub source_path: Option<String>,
+    /// How many times the copy was pasted where it was: each paste lands one more
+    /// [`cmd::edit::PASTE_OFFSET`] step down and right.
+    pub pastes: u32,
+    /// The layers were cut: the first paste goes back where they were.
+    pub cut: bool,
 }
 
 /// The editing session: open documents, the current tool, clipboard and prefs.
@@ -1514,6 +1519,8 @@ mod paint_reorder_tests;
 mod paint_tests;
 #[cfg(test)]
 mod panels_behaviour_tests;
+#[cfg(test)]
+mod paste_offset_tests;
 #[cfg(test)]
 mod pdf_print_tests;
 #[cfg(test)]
