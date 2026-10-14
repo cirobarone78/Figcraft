@@ -218,6 +218,9 @@ struct Log {
     bytes: u64,
     /// Changed since the last compaction.
     dirty: bool,
+    /// A compaction replaced the snapshot but couldn't start its log: the next start ignores this
+    /// log, so it takes nothing more and the file closes at the next flush (#183).
+    stale: bool,
 }
 
 struct Entry {
@@ -1121,7 +1124,7 @@ impl Store {
             (false, Ok(f)) => {
                 let bytes = f.metadata().map_or(LOG_HEADER as u64, |m| m.len());
                 // Replayed entries make it worth compacting once everyone has left.
-                Log { generation, file: f, pending: Vec::new(), entries: kept, bytes, dirty: kept > 0 }
+                Log { generation, file: f, pending: Vec::new(), entries: kept, bytes, dirty: kept > 0, stale: false }
             }
             // A new snapshot and log of the next generation, so appends start clean.
             _ => self.rewrite(file, generation + 1, &server)?,
@@ -1160,7 +1163,7 @@ impl Store {
                 log::warn!("file {file}: couldn't update {META}: {err}");
             }
         }
-        Ok(Log { generation, file: f, pending: Vec::new(), entries: 0, bytes: LOG_HEADER as u64, dirty: false })
+        Ok(Log { generation, file: f, pending: Vec::new(), entries: 0, bytes: LOG_HEADER as u64, dirty: false, stale: false })
     }
 
     /// Compactions so far.
@@ -1204,8 +1207,16 @@ impl Store {
                 }
                 log::debug!("compacted file {file}");
             }
-            // The old snapshot and log still hold everything: carry on appending.
-            Err(e) => log::error!("file {file}: compaction failed: {e}"),
+            Err(e) => {
+                log::error!("file {file}: compaction failed: {e}");
+                // The old snapshot and log still hold everything, unless the snapshot was replaced:
+                // then the old log no longer goes with it.
+                let snapshot = disk::read_capped(&self.dir(file).join(SNAPSHOT), self.snapshot_cap()).and_then(|b| disk::check_snapshot(&b));
+                let replaced = snapshot != Ok(generation);
+                if replaced && let Some(log) = self.files.get_mut(file).and_then(|e| e.log.as_mut()) {
+                    log.stale = true;
+                }
+            }
         }
     }
 
@@ -1232,6 +1243,10 @@ impl Store {
 /// Write and sync a log's pending records: the bytes written, or `Err` when that failed (the log
 /// can't be trusted to hold them).
 fn flush_log(id: &str, log: &mut Log) -> Result<u64, ()> {
+    if log.stale {
+        log::error!("file {id}: its log no longer goes with its snapshot");
+        return Err(());
+    }
     if log.pending.is_empty() {
         return Ok(0);
     }

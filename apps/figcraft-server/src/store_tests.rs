@@ -153,6 +153,74 @@ fn a_long_log_is_compacted_while_open() {
     assert_eq!(restored.replica(), server.replica());
 }
 
+/// Renames through `c` until a flush reports the file (the hub then closes it and nobody hears
+/// of that change): how many were acknowledged.
+fn rename_until_unsaved(store: &mut Store, id: &str, server: &mut Server, c: &mut Client, names: &[&str]) -> usize {
+    for (i, name) in names.iter().enumerate() {
+        rename(server, c, name);
+        store.changed(id, server);
+        if !store.flush().is_empty() {
+            return i;
+        }
+    }
+    names.len()
+}
+
+#[test]
+fn a_compaction_that_cant_start_its_log_loses_no_acknowledged_change() {
+    // #183: the snapshot is replaced, then the new log can't be written. The old log no longer
+    // goes with the snapshot, so what is added to it after that would be lost at the next start.
+    let dir = TempDir::new("split");
+    let c = StoreConfig { compact_after: 3, ..cfg(dir.path()) };
+    let mut store = Store::open(dir.path(), c.clone()).unwrap();
+    let (id, _, _) = publish(&mut store, "Split");
+    let mut server = store.open(&id).unwrap();
+    let mut a = join(&mut server, Access::Edit);
+    store.changed(&id, &mut server);
+    let file = dir.path().join(FILES).join(&id);
+    let blocked = [disk::temp_of(&file.join(LOG)), disk::temp_of(&file.join(SNAPSHOT))];
+    fs::create_dir(&blocked[0]).unwrap();
+    let names = ["P0", "P1", "P2", "P3", "P4"];
+    let mut acknowledged = rename_until_unsaved(&mut store, &id, &mut server, &mut a, &names[..3]);
+    if acknowledged == 3 {
+        // Still open: from now on its compactions can't replace the snapshot either.
+        fs::create_dir(&blocked[1]).unwrap();
+        acknowledged += rename_until_unsaved(&mut store, &id, &mut server, &mut a, &names[3..]);
+    }
+    assert!(acknowledged < names.len(), "the compaction's file was closed");
+    // A restart, the disk working again.
+    drop(store);
+    for b in blocked.iter().filter(|b| b.exists()) {
+        fs::remove_dir(b).unwrap();
+    }
+    let mut store = Store::open(dir.path(), c).unwrap();
+    let restored = store.open(&id).unwrap();
+    let page = restored.replica().document().first_page().unwrap();
+    let name = &restored.replica().document().node(page).unwrap().name;
+    let kept = names.iter().position(|n| n == name).map_or(0, |i| i + 1);
+    assert!(kept >= acknowledged, "{acknowledged} changes acknowledged, {kept} came back");
+}
+
+#[test]
+fn a_compaction_that_writes_nothing_carries_on_with_its_log() {
+    let dir = TempDir::new("unsplit");
+    let c = StoreConfig { compact_after: 3, ..cfg(dir.path()) };
+    let mut store = Store::open(dir.path(), c.clone()).unwrap();
+    let (id, _, _) = publish(&mut store, "Unsplit");
+    let mut server = store.open(&id).unwrap();
+    let mut a = join(&mut server, Access::Edit);
+    store.changed(&id, &mut server);
+    // The snapshot can't be replaced: the old snapshot and log still hold everything.
+    let blocked = disk::temp_of(&dir.path().join(FILES).join(&id).join(SNAPSHOT));
+    fs::create_dir(&blocked).unwrap();
+    let names = ["P0", "P1", "P2", "P3", "P4"];
+    assert_eq!(rename_until_unsaved(&mut store, &id, &mut server, &mut a, &names), names.len());
+    drop(store);
+    fs::remove_dir(&blocked).unwrap();
+    let mut store = Store::open(dir.path(), c).unwrap();
+    assert_eq!(store.open(&id).unwrap().replica(), server.replica());
+}
+
 #[test]
 fn damaged_files_are_skipped_and_reported() {
     let dir = TempDir::new("damaged");
