@@ -662,6 +662,13 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
     remember(s, &path);
     let native = !rest && matches!(ext(&path).as_str(), "figcraft" | "json");
     let warnings = rest || ext(&path) == "svg";
+    // A native file that lost something (a damaged image, say): the app says so, not only the result.
+    if native && !loaded.issues.is_empty() {
+        s.message = Some(match loaded.issues.as_slice() {
+            [one] => format!("{}: {one}", file_stem(&path)),
+            more => format!("{}: {} problems were repaired or left out while opening it, e.g. {}", file_stem(&path), more.len(), more[0]),
+        });
+    }
     s.docs.push(DocState::new(loaded.doc, native.then_some(path)).with_versions(loaded.versions).with_branches(loaded.branches));
     s.active = s.docs.len() - 1;
     let mut out = json!({"index": s.active});
