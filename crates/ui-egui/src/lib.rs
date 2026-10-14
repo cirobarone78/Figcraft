@@ -735,7 +735,7 @@ impl FigApp {
                 "dialog.unsaved" => self.toast(i18n::tr("This file has unsaved changes")),
                 "dialog.plugins" => self.ui.plugins_window = true,
                 "dialog.cursorChat" => live::open_chat(self),
-                "window.new" | "window.focus" => self.window_requests.push(r),
+                "window.new" | "window.focus" | "window.fullscreen" => self.window_requests.push(r),
                 _ => {}
             }
         }
