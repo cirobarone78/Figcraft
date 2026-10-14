@@ -1,7 +1,7 @@
 //! Embeds the optional craft-fonts build input (`CRAFT_FONTS_DIR`): both `fonts/manifest.txt` and the
 //! opt-in Latin presentation fonts in `fonts/latin-manifest.txt` (Inter, Roboto, …). Unset or missing,
 //! `CRAFT_FONTS` is empty and the app uses system fonts. Recipe: craft-fonts `docs/integration.md`.
-//! Noto Sans CJK only with `FIGCRAFT_EMBED_CJK` set (the web build's only way to show CJK UI text).
+//! Noto Sans CJK is included in web builds; desktop builds opt in with `FIGCRAFT_EMBED_CJK`.
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -46,13 +46,13 @@ fn craft_fonts(dir: &std::path::Path, manifest_rel: &str) -> Result<String, Stri
         let [family, style, file, scripts, ..] = f.as_slice() else {
             return Err(format!("malformed manifest line: {line}"));
         };
-        // CJK fonts are large; the desktop app finds system CJK fonts instead unless asked.
+        // CJK fonts are large; desktop apps find system CJK fonts instead unless asked. Web apps
+        // have no system fonts, so include Noto Sans CJK by default.
         let cjk = scripts.contains("Hans");
-        if cjk && std::env::var_os("FIGCRAFT_EMBED_CJK").is_none() {
+        if cjk && !wasm && std::env::var_os("FIGCRAFT_EMBED_CJK").is_none() {
             continue;
         }
-        // Web builds have a size budget: Inter, plus Noto Sans CJK (every CJK script, for CJK UI
-        // text) when asked.
+        // Web builds have a size budget: Inter plus Noto Sans CJK for Chinese, Japanese and Korean.
         if wasm && *family != "Inter" && !cjk {
             continue;
         }

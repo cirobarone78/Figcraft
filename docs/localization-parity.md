@@ -70,16 +70,15 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
   CJK SC) ahead of the built-in Japanese one, so Han takes Simplified Chinese shapes; changing the
   UI language lays the faces out again. Only that face's file is read and egui shares its bytes, so English users load
   nothing (startup and memory measured unchanged); no CJK font installed means tofu, never a
-  crash. The web build has no system fonts: built with craft-fonts and `FIGCRAFT_EMBED_CJK=1` it
-  embeds Noto Sans CJK SC (+16 MB) and offers Japanese, Korean and Simplified Chinese; otherwise the language picker and
-  System leave them out. No font file is in this repo.
+  crash. The web build has no system fonts, so it embeds Noto Sans CJK SC from craft-fonts by
+  default (+16 MB) and offers Japanese, Korean and Simplified Chinese. No font file is in this repo.
 
 ## Languages
 
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | Hours to full |
 |---|---|---|---|---|---|---|---|
 | English | en | 2,076 / 2,076 (100%, source) | yes | Latin | yes (source) | full | 0 |
-| Simplified Chinese (Mandarin) | zh-Hans | 2,076 / 2,076 (100%, draft) | yes | CJK text and IME in documents; UI text in an installed Chinese face, ahead of Japanese ones (web: the `FIGCRAFT_EMBED_CJK` build); no Traditional Chinese catalog (zh-TW, zh-HK read English) | no | draft | 1–2 (after native review) |
+| Simplified Chinese (Mandarin) | zh-Hans | 2,076 / 2,076 (100%, draft) | yes | CJK text and IME in documents; UI text in an installed Chinese face, ahead of Japanese ones (web embeds Noto Sans CJK); no Traditional Chinese catalog (zh-TW, zh-HK read English) | no | draft | 1–2 (after native review) |
 | Spanish | es, es-419 | 2,076 / 2,076 (100%, draft); es-419 overlays 98 Latin American wordings (draft) | yes | Latin | no | draft | 0–1 (after native review) |
 | Hindi | hi | 0 (0%) | no | Devanagari shaping works in documents; UI font fallback to check | no | none | 4–7 |
 | Arabic | ar | 0 (0%) | no | Bidi, shaping and RTL names work; the UI does not mirror | no | none | 9–15 |

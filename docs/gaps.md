@@ -146,7 +146,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 - **Missing:** native reviews of the Spanish, French, German, Brazilian Portuguese, Japanese,
   Korean and Simplified Chinese drafts and the Latin American Spanish overlay, the 25 newest strings
   in five drafts, Hindi, Arabic, Indonesian and Vietnamese, localized engine messages and number
-  formatting; CJK UI text on the web without the craft-fonts CJK build.
+  formatting.
 - **Evidence (measured from source):** the layer landed 2026-10-11: catalogs in
   `crates/ui-egui/locales/` (1,371 UI keys plus 524 command labels and 29 menu wordings),
   Preferences ▸ Language, `pref.language`; `en.toml` is complete, and `es.toml`, `fr.toml`,
@@ -439,3 +439,4 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 | 2026-10-10 | minor | Merged main after #101–#103: WASM plugins (plugins area 0% → 35% breadth, 20% ready; ecosystem 5% → 20%) and the multiplayer core without networking (multiplayer 5% → 15% breadth, 5% ready; collaboration 8% → 12%); menu breadth 97.5% → 98.5% (200/203); ready for real work ~46% → ~47%; full parity 420–790 h → 390–745 h; beta 210–380 h → 200–365 h. Fixed the stated weight sums (areas 1–16 sum to 94, total 113; percentages were already computed with those) |
 | 2026-10-10 | minor | Marked beta blockers; no alpha blockers (the alpha gate passes) |
 | 2026-10-10 | major | Created from the 2026-10-10 re-measure against Figma desktop 126.10.7 (replaces the gap list that lived in ROADMAP.md) |
+| 2026-10-14 | minor | Chinese/CJK web font gap (#215): web builds now embed Noto Sans CJK from craft-fonts by default; removed the opt-in build as a localization gap |

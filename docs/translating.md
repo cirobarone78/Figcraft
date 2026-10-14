@@ -47,8 +47,9 @@ None of the three has plural forms.
 
 CJK text needs a CJK font, which egui and Inter lack: the desktop app adds an installed one when
 something on screen needs it (see `crates/ui-egui/src/cjk.rs`). The web build has no system fonts,
-so Japanese, Korean and Chinese appear there only in a build with craft-fonts and
-`FIGCRAFT_EMBED_CJK=1` (Noto Sans CJK SC, +16 MB); otherwise they are left out of the picker. A
+so it embeds Noto Sans CJK SC from craft-fonts by default (+16 MB) and offers Japanese, Korean and
+Chinese. Desktop builds use installed system fonts; set `FIGCRAFT_EMBED_CJK=1` to embed the same
+face there. A
 Chinese UI puts its Chinese face first so Han takes Simplified Chinese shapes. A new CJK or other non-Latin
 language also needs its script in `cjk::language`.
 
