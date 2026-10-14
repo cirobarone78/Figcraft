@@ -59,6 +59,36 @@ fn cut_diffs(d: &Document, p: NodeId) -> Vec<(u32, (u8, usize))> {
         .collect()
 }
 
+/// Digests of glass renders over a spread of settings, scales and corners: compare two builds'
+/// output with `cargo test --release -p figcraft-render --lib glass_digests -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints digests to compare builds"]
+fn glass_digests() {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let looks = [
+        Glass::default(),
+        wide_light(),
+        Glass { splay: 0.5, frost: 0.0, refraction: 0.0, ..Glass::default() },
+        Glass { refraction: 1.0, dispersion: 1.0, frost: 10.0, depth: 60.0, light_intensity: 0.0, ..Glass::default() },
+        Glass { depth: 1.0, splay: 0.3, light_angle: 120.0, ..Glass::default() },
+    ];
+    let mut all = DefaultHasher::new();
+    for (i, g) in looks.into_iter().enumerate() {
+        for radius in [0.0, 40.0] {
+            let (d, p) = pane_over_stripes(g.clone(), radius);
+            for scale in [1.0, 1.37, 2.0] {
+                let v = View { origin: (100.0, 100.0), scale, width: (1000.0 * scale) as u32, height: (700.0 * scale) as u32 };
+                let pix = render_view_single(&d, p, &v, &Options::default()).unwrap();
+                let mut h = DefaultHasher::new();
+                pix.data().hash(&mut h);
+                println!("glass {i} radius {radius} scale {scale}: {:016x}", h.finish());
+                pix.data().hash(&mut all);
+            }
+        }
+    }
+    println!("all: {:016x}", all.finish());
+}
+
 #[test]
 fn a_cut_through_the_pane_matches_the_whole_render() {
     // Square corners: straight edges on whole pixels raster the same in any cut.

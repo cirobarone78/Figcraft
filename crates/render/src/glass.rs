@@ -231,15 +231,26 @@ pub fn glass(g: &Glass, shape: &Outline, back: &Pixmap, pad: u32, w: u32, h: u32
             let t = (d / depth).min(1.0);
             let bend = bend_max * (1.0 - t) * (1.0 - t);
             let (bx, by) = (x as f32 + pad as f32 + 0.5, y as f32 + pad as f32 + 0.5);
-            let at = |k: f32| sample(&frosted, bx + inward.0 * bend * k, by + inward.1 * bend * k);
-            let (rs, gs, bs) = (at(1.0 - fringe), at(1.0), at(1.0 + fringe));
-            let a = rs[3].max(gs[3]).max(bs[3]);
-            let base = [rs[0].min(a), gs[1].min(a), bs[2].min(a), a];
-            // The rim catches the light where it faces it, and half as much opposite.
-            let facing = -(inward.0 * light.0 + inward.1 * light.1);
-            let spec = facing.max(0.0).powf(power) + 0.5 * (-facing).max(0.0).powf(power);
-            // Past `reach` the light is under half a level: none, wherever the layer is cut.
-            let hl = if d < reach { (intensity * spec * (-d / band).exp()).clamp(0.0, 1.0) } else { 0.0 };
+            let base = if bend == 0.0 {
+                // Nothing bends (past `depth`, or no refraction): the three channels' samples are
+                // at the same point, so one sample.
+                let s = sample(&frosted, bx, by);
+                [s[0].min(s[3]), s[1].min(s[3]), s[2].min(s[3]), s[3]]
+            } else {
+                let at = |k: f32| sample(&frosted, bx + inward.0 * bend * k, by + inward.1 * bend * k);
+                let (rs, gs, bs) = (at(1.0 - fringe), at(1.0), at(1.0 + fringe));
+                let a = rs[3].max(gs[3]).max(bs[3]);
+                [rs[0].min(a), gs[1].min(a), bs[2].min(a), a]
+            };
+            // The rim catches the light where it faces it, and half as much opposite. Past `reach`
+            // the light is under half a level: none, wherever the layer is cut.
+            let hl = if d < reach {
+                let facing = -(inward.0 * light.0 + inward.1 * light.1);
+                let spec = facing.max(0.0).powf(power) + 0.5 * (-facing).max(0.0).powf(power);
+                (intensity * spec * (-d / band).exp()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let i = (y * w as usize + x) * 4;
             if let Some(p) = dst.get_mut(i..i + 4) {
                 for (o, v) in p.iter_mut().zip(base) {
