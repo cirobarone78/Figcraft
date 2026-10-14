@@ -57,14 +57,18 @@ pub fn try_import(bytes: &[u8], name: &str) -> Option<Result<(Document, Vec<Stri
 /// Build a document from a `.fig` file. Returns it with the warnings about what was skipped or
 /// approximated. `name`: the document name when the file doesn't carry one.
 pub fn import(bytes: &[u8], name: &str) -> Result<(Document, Vec<String>), FormatError> {
-    let archive = Archive::open(bytes)?;
-    let (schema, message) = decode_canvas(&archive.canvas)?;
+    let mut archive = Archive::open(bytes)?;
+    // Each stage's input is dropped as soon as the next one is built: in a large file every one
+    // of them takes gigabytes, and holding them all at once runs out of memory.
+    let (schema, message) = decode_canvas(&std::mem::take(&mut archive.canvas))?;
     let root = schema.find("Message").ok_or_else(|| corrupt("the schema has no Message definition"))?;
     let msg = schema.decode_message(root, &message).map_err(|e| corrupt(e.to_string()))?;
+    drop(message);
     let file_name = archive.file_name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(name);
-    let (json, mut warnings) = map::to_rest(&msg, file_name);
+    let (json, mut warnings, networks) = map::to_rest(&msg, file_name);
+    drop(msg);
     let images = |r: &str| archive.image(r);
-    let (doc, more) = crate::rest::import(&json, &images)?;
+    let (doc, more) = crate::rest::import_with_networks(&json, &images, networks)?;
     warnings.extend(more.into_iter().filter_map(map::adapt_warning));
     Ok((doc, warnings))
 }
