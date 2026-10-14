@@ -203,6 +203,11 @@ pub(crate) fn stroke_rule(n: &Node, closed: bool) -> FillRule {
 /// The geometry a node fills, in local space: shapes, booleans (computed from children) and text
 /// (glyph outlines). Groups and pages have none.
 pub fn node_outline(doc: &Document, n: &Node) -> Option<(BezPath, FillRule)> {
+    node_outline_at(doc, n, 0)
+}
+
+/// [`node_outline`] `depth` levels into a boolean or group nesting (one budget for both).
+fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, FillRule)> {
     match &n.kind {
         NodeKind::BooleanOp { op } => {
             let operands: Vec<(BezPath, figcraft_doc::BoolOp)> = n
@@ -211,7 +216,7 @@ pub fn node_outline(doc: &Document, n: &Node) -> Option<(BezPath, FillRule)> {
                 .filter_map(|c| doc.node(*c))
                 .filter(|c| c.visible)
                 .filter_map(|c| {
-                    let (mut p, _) = subtree_outline(doc, c, 0)?;
+                    let (mut p, _) = subtree_outline(doc, c, depth + 1)?;
                     p.apply_affine(c.transform);
                     Some((p, c.bool_op.unwrap_or(*op)))
                 })
@@ -258,7 +263,7 @@ pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPat
             }
             Some((out, FillRule::Winding))
         }
-        _ => node_outline(doc, n),
+        _ => node_outline_at(doc, n, depth),
     }
 }
 
