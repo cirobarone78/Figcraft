@@ -607,69 +607,67 @@ fn palette(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let screen = ctx.content_rect();
     let mut run: Option<String> = None;
-    let mut close = false;
-    egui::Area::new(Id::new("palette")).fixed_pos(pos2(screen.center().x - 260.0, screen.min.y + 120.0)).order(egui::Order::Foreground).show(
-        ctx,
-        |ui| {
-            egui::Frame::NONE
-                .fill(t.panel)
-                .corner_radius(CornerRadius::same(13))
-                .stroke(Stroke::new(1.0, t.border))
-                .shadow(egui::Shadow { offset: [0, 8], blur: 32, spread: 0, color: t.shadow })
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.set_width(520.0);
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut q)
-                            .hint_text(tr("Search actions, layers and tools"))
-                            .desired_width(500.0)
-                            .font(regular(14.0))
-                            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(8))),
-                    );
-                    r.request_focus();
-                    ui.add_space(4.0);
-                    let ql = q.to_lowercase();
-                    // Labels match in the UI language and in English.
-                    let matches =
-                        |label: &str, english: &str, id: &str| ql.is_empty() || [label, english, id].iter().any(|s| s.to_lowercase().contains(&ql));
-                    let mut hits: Vec<(&str, std::borrow::Cow<str>, &str)> = Vec::new();
-                    let menu_items = MENU.iter().filter(|m| UI_COMMANDS.contains(&m.id)).map(|m| (m.id, m.label));
-                    for (id, english) in figcraft_engine::all_commands().iter().map(|c| (c.id, c.label)).chain(menu_items) {
-                        let label = i18n::command(id, english);
-                        if matches(&label, english, id) {
-                            hits.push((id, label, crate::shortcuts::shortcut(id).unwrap_or("")));
-                        }
-                    }
-                    hits.sort_by_key(|h| (!h.1.to_lowercase().starts_with(&ql), h.1.len()));
-                    hits.dedup_by(|a, b| a.0 == b.0);
-                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                        for (i, (id, label, sc)) in hits.iter().take(60).enumerate() {
-                            let w = ui.available_width();
-                            let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
-                            if resp.hovered() || i == 0 {
-                                ui.painter().rect_filled(r, CornerRadius::same(5), if resp.hovered() { ACCENT } else { t.hover });
-                            }
-                            let col = if resp.hovered() { Color32::WHITE } else { t.text };
-                            ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label.as_ref(), regular(12.0), col);
-                            ui.painter().text(
-                                pos2(r.max.x - 10.0, r.center().y),
-                                Align2::RIGHT_CENTER,
-                                pretty_shortcut(sc),
-                                regular(11.0),
-                                if resp.hovered() { Color32::WHITE } else { t.text_secondary },
-                            );
-                            if resp.clicked() || (enter && i == 0) {
-                                run = Some(id.to_string());
-                            }
-                        }
-                    });
-                });
-        },
-    );
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        close = true;
-    }
+    // Modal: a press anywhere else closes it instead of reaching the canvas or the panels.
+    let area = egui::Area::new(Id::new("palette"))
+        .kind(egui::UiKind::Modal)
+        .fixed_pos(pos2(screen.center().x - 260.0, screen.min.y + 120.0))
+        .order(egui::Order::Foreground)
+        .interactable(true);
+    let frame = egui::Frame::NONE
+        .fill(t.panel)
+        .corner_radius(CornerRadius::same(13))
+        .stroke(Stroke::new(1.0, t.border))
+        .shadow(egui::Shadow { offset: [0, 8], blur: 32, spread: 0, color: t.shadow })
+        .inner_margin(egui::Margin::same(8));
+    let modal = egui::Modal::new(Id::new("palette")).area(area).frame(frame).backdrop_color(Color32::TRANSPARENT).show(ctx, |ui| {
+        ui.set_width(520.0);
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut q)
+                .hint_text(tr("Search actions, layers and tools"))
+                .desired_width(500.0)
+                .font(regular(14.0))
+                .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(8))),
+        );
+        r.request_focus();
+        ui.add_space(4.0);
+        let ql = q.to_lowercase();
+        // Labels match in the UI language and in English.
+        let matches = |label: &str, english: &str, id: &str| ql.is_empty() || [label, english, id].iter().any(|s| s.to_lowercase().contains(&ql));
+        let mut hits: Vec<(&str, std::borrow::Cow<str>, &str)> = Vec::new();
+        let menu_items = MENU.iter().filter(|m| UI_COMMANDS.contains(&m.id)).map(|m| (m.id, m.label));
+        for (id, english) in figcraft_engine::all_commands().iter().map(|c| (c.id, c.label)).chain(menu_items) {
+            let label = i18n::command(id, english);
+            if matches(&label, english, id) {
+                hits.push((id, label, crate::shortcuts::shortcut(id).unwrap_or("")));
+            }
+        }
+        hits.sort_by_key(|h| (!h.1.to_lowercase().starts_with(&ql), h.1.len()));
+        hits.dedup_by(|a, b| a.0 == b.0);
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            for (i, (id, label, sc)) in hits.iter().take(60).enumerate() {
+                let w = ui.available_width();
+                let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+                if resp.hovered() || i == 0 {
+                    ui.painter().rect_filled(r, CornerRadius::same(5), if resp.hovered() { ACCENT } else { t.hover });
+                }
+                let col = if resp.hovered() { Color32::WHITE } else { t.text };
+                ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, label.as_ref(), regular(12.0), col);
+                ui.painter().text(
+                    pos2(r.max.x - 10.0, r.center().y),
+                    Align2::RIGHT_CENTER,
+                    pretty_shortcut(sc),
+                    regular(11.0),
+                    if resp.hovered() { Color32::WHITE } else { t.text_secondary },
+                );
+                if resp.clicked() || (enter && i == 0) {
+                    run = Some(id.to_string());
+                }
+            }
+        });
+    });
+    // Escape (with any modifiers, from the first frame), or a click or drag outside it.
+    let close = ctx.input(|i| i.key_pressed(egui::Key::Escape)) || modal.backdrop_response.drag_started() || modal.should_close();
     if let Some(id) = run {
         app.ui.palette = None;
         invoke(app, &id);
