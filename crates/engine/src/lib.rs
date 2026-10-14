@@ -1069,11 +1069,8 @@ impl Session {
     /// own, and when it fails the documents stay at their group-start state.
     pub fn grouped<T>(&mut self, label: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         self.ds()?;
-        let before: Vec<_> = self
-            .docs
-            .iter()
-            .map(|ds| (ds.uid, ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.undo.len(), ds.history.limit))
-            .collect();
+        let before: Vec<_> =
+            self.docs.iter().map(|ds| (ds.uid, ds.doc.clone(), ds.selection.clone(), ds.page, ds.history.undo.len(), ds.history.limit)).collect();
         let active = self.active;
         let journal_len = self.journal.len();
 
@@ -1109,8 +1106,7 @@ impl Session {
             .iter()
             .filter_map(|(uid, doc, selection, page, _, _)| {
                 let ds = self.docs.iter().find(|d| d.uid == *uid)?;
-                (!Arc::ptr_eq(doc, &ds.doc) && ds.interaction.is_none())
-                    .then(|| (*uid, doc.clone(), selection.clone(), *page))
+                (!Arc::ptr_eq(doc, &ds.doc) && ds.interaction.is_none()).then(|| (*uid, doc.clone(), selection.clone(), *page))
             })
             .collect();
         for ds in &mut self.docs {
@@ -1384,6 +1380,8 @@ mod arc_handles_tests;
 #[cfg(test)]
 mod autosave_tests;
 #[cfg(test)]
+mod batch_rollback_tests;
+#[cfg(test)]
 mod binding_lists_tests;
 #[cfg(test)]
 mod booleans_tests;
@@ -1579,8 +1577,6 @@ mod styles_behaviour_tests;
 mod svg_import_tests;
 #[cfg(test)]
 mod templates_tests;
-#[cfg(test)]
-mod batch_rollback_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

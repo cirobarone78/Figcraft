@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::plugins_tests::{b64, install, manifest, script, OnRefusal};
+use crate::plugins_tests::{OnRefusal, install, manifest, script};
 use crate::{EngineError, Session};
 
 fn id(value: &serde_json::Value) -> crate::NodeId {
@@ -49,12 +49,14 @@ fn failed_plugin_run_restores_each_document_without_restoring_unrelated_state() 
     s.message = Some("keep this".into());
     let before_journal = s.journal.clone();
     let before_message = s.message.clone();
+    // The new file is the one in front when the plugin starts.
+    let before_active = s.active;
 
     let result = s.execute("plugin.run", &json!({"id": "org.test.rollback"}));
 
     assert!(matches!(result, Err(EngineError::Other(_))));
     assert_eq!(s.docs.iter().map(|ds| ds.doc.node(ds.page).map_or(0, |page| page.children.len())).collect::<Vec<_>>(), vec![0, 0]);
-    assert_eq!(s.active, 0);
+    assert_eq!(s.active, before_active, "the tab in front is put back");
     assert_eq!(s.docs.iter().map(|ds| ds.history.undo.len()).collect::<Vec<_>>(), before_history);
     assert_eq!(s.journal, before_journal);
     assert_eq!(s.message, before_message);
