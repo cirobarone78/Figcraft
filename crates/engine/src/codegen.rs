@@ -18,13 +18,13 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![spec!(
         "inspect.code",
         "Code for layer",
-        "{id?, language?: css|html|react|swiftui|compose (default css; html and react are the whole layer tree; components take their properties as parameters, instances pass their values; a component connected to code (codeConnect.set) gives its import and snippet instead), unit?: px|rem (CSS, HTML and React; default px), rootFontSize? (rem: pixels per rem, default 16)} → {code, language, connected}",
+        "{id?, language?: css|html|react|leptos|swiftui|compose (default css; html, react and leptos are the whole layer tree; components take their properties as parameters, instances pass their values; a component connected to code (codeConnect.set) gives its import and snippet instead), unit?: px|rem (CSS, HTML, React and Leptos; default px), rootFontSize? (rem: pixels per rem, default 16)} → {code, language, connected}",
         false,
         |s, p| {
             let cmd = "inspect.code";
             let id = targets(s, p).first().copied().ok_or_else(|| bad(cmd, "select a layer"))?;
             let lang = match string(p, "language") {
-                Some(l) => CodeLang::from_id(&l).ok_or_else(|| bad(cmd, "language: css|html|react|swiftui|compose"))?,
+                Some(l) => CodeLang::from_id(&l).ok_or_else(|| bad(cmd, "language: css|html|react|leptos|swiftui|compose"))?,
                 None => CodeLang::Css,
             };
             let rem = match string(p, "unit").map(|u| u.to_ascii_lowercase()).as_deref() {
@@ -42,7 +42,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let connected = crate::code_connect::link(doc, id, lang).is_some();
             let code = code_for(doc, id, lang);
             let code = match rem {
-                Some(root) if matches!(lang, CodeLang::Css | CodeLang::Html | CodeLang::React) => px_to_rem(&code, root),
+                Some(root) if lang.is_web() => px_to_rem(&code, root),
                 _ => code,
             };
             Ok(json!({"code": code, "language": lang.id(), "connected": connected}))
@@ -59,17 +59,20 @@ pub enum CodeLang {
     Html,
     /// A React function component (TSX) with its stylesheet.
     React,
+    /// A Leptos component (`view!` markup) with its stylesheet.
+    Leptos,
     SwiftUi,
     Compose,
 }
 
 impl CodeLang {
-    pub const ALL: [CodeLang; 5] = [CodeLang::Css, CodeLang::Html, CodeLang::React, CodeLang::SwiftUi, CodeLang::Compose];
+    pub const ALL: [CodeLang; 6] = [CodeLang::Css, CodeLang::Html, CodeLang::React, CodeLang::Leptos, CodeLang::SwiftUi, CodeLang::Compose];
     pub fn id(self) -> &'static str {
         match self {
             CodeLang::Css => "css",
             CodeLang::Html => "html",
             CodeLang::React => "react",
+            CodeLang::Leptos => "leptos",
             CodeLang::SwiftUi => "swiftui",
             CodeLang::Compose => "compose",
         }
@@ -79,9 +82,14 @@ impl CodeLang {
             CodeLang::Css => "CSS",
             CodeLang::Html => "HTML + CSS",
             CodeLang::React => "React",
+            CodeLang::Leptos => "Leptos",
             CodeLang::SwiftUi => "SwiftUI",
             CodeLang::Compose => "Compose",
         }
+    }
+    /// Languages whose lengths are CSS pixels (they can be shown in rem).
+    pub fn is_web(self) -> bool {
+        matches!(self, CodeLang::Css | CodeLang::Html | CodeLang::React | CodeLang::Leptos)
     }
     pub fn from_id(s: &str) -> Option<CodeLang> {
         if s.eq_ignore_ascii_case("tsx") || s.eq_ignore_ascii_case("jsx") {
@@ -136,6 +144,7 @@ pub fn code_for(doc: &Document, id: NodeId, lang: CodeLang) -> String {
     match lang {
         CodeLang::Css => css(doc, id),
         CodeLang::Html => html(doc, id),
+        CodeLang::Leptos => leptos(doc, id),
         CodeLang::React | CodeLang::SwiftUi | CodeLang::Compose => crate::component_codegen::code(doc, id, lang),
     }
 }
@@ -566,11 +575,40 @@ fn html(doc: &Document, id: NodeId) -> String {
     format!("{}\n<style>\n{}{}</style>\n", out.markup, out.tokens.root_rule(), out.styles)
 }
 
+/// The tree under `id` as a Leptos component: the HTML markup in `view!`, its stylesheet after.
+fn leptos(doc: &Document, id: NodeId) -> String {
+    let ctx = Ctx { doc, root: id, comp: None, base: 2 };
+    let mut out = Markup::new(&ctx, false);
+    out.leptos = true;
+    let name = doc.node(id).map(|n| n.name.clone()).unwrap_or_default();
+    let class = class_name(&name, &mut Vec::new());
+    out.root_class = Some(class.clone());
+    out.node(id, None, 2, "");
+    let t = crate::component_codegen::component_type_name(&name);
+    format!(
+        "use leptos::prelude::*;
+
+#[component]
+pub fn {t}() -> impl IntoView {{
+    view! {{
+{}    }}
+}}
+
+/* {class}.css */
+{}{}",
+        out.markup,
+        out.tokens.root_rule(),
+        out.styles
+    )
+}
+
 /// Markup being built for a layer tree: HTML (`class`) or React JSX (`className`, component
 /// parameters, instances as calls), with its stylesheet.
 pub(crate) struct Markup<'c, 'a> {
     ctx: &'c Ctx<'a>,
     jsx: bool,
+    /// Leptos `view!` markup: text as Rust string literals.
+    pub leptos: bool,
     used: Vec<String>,
     pub markup: String,
     pub styles: String,
@@ -588,6 +626,7 @@ impl<'c, 'a> Markup<'c, 'a> {
         Markup {
             ctx,
             jsx,
+            leptos: false,
             used: Vec::new(),
             markup: String::new(),
             styles: String::new(),
@@ -695,6 +734,9 @@ impl<'c, 'a> Markup<'c, 'a> {
                 let body = match self.ctx.param(n, "characters").filter(|_| self.jsx) {
                     Some(p) => format!("{{{}}}", p.ident),
                     None if self.jsx => jsx_text(&t.characters),
+                    None if self.leptos => {
+                        t.characters.chars().take(10_000).collect::<String>().lines().map(|l| format!("{l:?}")).collect::<Vec<_>>().join("<br/>")
+                    }
                     None => html_escape(&t.characters),
                 };
                 self.markup.push_str(&format!("{}{body}</p>\n", open("p")));

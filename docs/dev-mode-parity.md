@@ -10,7 +10,7 @@ inside generated layer trees. Remaining: 0–1 h.
 |---|---|---|
 | Dev Mode toggle (Shift+D), Inspect panel | done | |
 | Properties with their styles and variables; redlines on hover | done | positions from the frame around the layer (groups aren't frames), rotation, radius (CSS corner order), opacity, blend; colours in hex, RGB, CSS, HSL or HSB (`inspect.properties {colorFormat}`, the Inspect tab's Color format) |
-| Code: CSS, iOS (SwiftUI), Android (Compose) | done | plus HTML and React (ours); components take properties as parameters, instances are calls; CSS in px or rem (`inspect.code {unit, rootFontSize}`), with rotation, blend modes, gradient directions and kinds (linear, radial, conic), text alignment, case and decoration |
+| Code: CSS, iOS (SwiftUI), Android (Compose) | done | plus HTML, React and Leptos (ours; Leptos: the layer tree as a `#[component]` with `view!` markup and its stylesheet); components take properties as parameters, instances are calls; CSS in px or rem (`inspect.code {unit, rootFontSize}`), with rotation, blend modes, gradient directions and kinds (linear, radial, conic), text alignment, case and decoration |
 | Assets list with export | done | layers with export settings, icons (small, vector shapes only: SVG) and images (PNG); the icon rule is ours |
 | Annotations: pinned properties, categories, coloured callouts, filter | done | |
 | Ready for dev list, statuses, "Changed" after edits | done | |
