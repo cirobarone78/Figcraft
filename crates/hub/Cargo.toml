@@ -14,7 +14,7 @@ figcraft-doc = { workspace = true }
 # the family consumes `craft-print`, pinned to the reviewed commit. Retargeted to the org's
 # canonical home (storytold/craft-libs or storytold/crafthub) the day that PR merges — a one-line
 # change, noted in this PR's description.
-craft-collab = { git = "https://github.com/hasan-sdaif/crafthub", rev = "91ed152c63a2b43d9c66c9dd719d001627ca5ce1" }
+craft-collab = { git = "https://github.com/hasan-sdaif/crafthub", rev = "1e96a9fb9b8c82ac6ec31818608967b66ef7a527" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
