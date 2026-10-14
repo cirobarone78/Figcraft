@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use craft_ui::theme::SuiteDarkPalette;
+use craft_ui::theme::SuitePalette;
 use egui::{Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,7 +97,7 @@ impl Tokens {
     }
 
     pub fn dark() -> Self {
-        let suite = SuiteDarkPalette::ARTCRAFT;
+        let suite = SuitePalette::ARTCRAFT_DARK;
         // ArtCraft standard dark UI roles. Keep document/page and semantic colours separate
         // from the interface chrome.
         Self {
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn shared_dark_adapter_maps_ui_roles() {
-        let suite = super::SuiteDarkPalette::ARTCRAFT;
+        let suite = super::SuitePalette::ARTCRAFT_DARK;
         let dark = super::Tokens::dark();
         for (actual, expected) in [
             (dark.bg, suite.window),
