@@ -226,3 +226,50 @@ fn pages_drag_to_reorder_and_dividers_open_nothing() {
     assert_eq!(u.app.session.page().unwrap(), p1, "clicking a divider opens nothing");
     assert!(u.app.ui.last_error.is_none(), "{:?}", u.app.ui.last_error);
 }
+
+/// Whether clicking down the pages list's viewport (the rows in view, under the panel's header and
+/// the list's own) ever lands on page `page` (a click found while scanning stops the scan).
+fn viewport_clicks_reach(u: &mut Ui, page: NodeId) -> bool {
+    for y in (108..380).step_by(4) {
+        let p = Pos2::new(150.0, y as f32);
+        u.button(p, true);
+        u.button(p, false);
+        u.app.ui.rename_page = None;
+        if u.app.session.page().unwrap() == page {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn many_pages_scroll_in_the_pages_list() {
+    let mut s = Session::new();
+    let first = s.page().unwrap();
+    // More pages than the list's share of the panel (at most a quarter of it, at least three rows)
+    // shows at once.
+    for _ in 0..15 {
+        s.execute("page.add", &json!({})).unwrap();
+    }
+    let last = id(s.execute("page.add", &json!({})).unwrap());
+    s.execute("page.select", &json!({"id": first})).unwrap();
+    let mut u = Ui::new(s);
+    // With the list overflowed the bottom page sits below its viewport: no click in view opens it.
+    assert!(!viewport_clicks_reach(&mut u, last), "the bottom page is out of view before scrolling");
+    // Wheeling down over the list brings the bottom pages into view (the reported lock). Small
+    // wheel steps (under eight points) apply at once; big ones egui smooths over many frames.
+    let wheel = Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -7.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Default::default(),
+    };
+    for _ in 0..120 {
+        u.frame(vec![Event::PointerMoved(Pos2::new(150.0, 200.0)), wheel.clone()]);
+    }
+    for _ in 0..30 {
+        u.frame(vec![]);
+    }
+    assert!(viewport_clicks_reach(&mut u, last), "scrolling the list opens the bottom pages");
+    assert!(u.app.ui.last_error.is_none(), "{:?}", u.app.ui.last_error);
+}
