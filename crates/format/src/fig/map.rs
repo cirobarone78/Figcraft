@@ -595,7 +595,9 @@ impl<'a> Mapper<'a> {
         let main = match v.str("stackPrimaryAlignItems").or_else(|| v.str("stackJustify")) {
             Some("CENTER") => "CENTER",
             Some("MAX") => "MAX",
-            Some("SPACE_BETWEEN" | "SPACE_EVENLY" | "SPACE_AROUND" | "SPACE_EVENLY_CSS") => "SPACE_BETWEEN",
+            Some("SPACE_AROUND") => "SPACE_AROUND",
+            Some("SPACE_EVENLY") => "SPACE_EVENLY",
+            Some("SPACE_BETWEEN" | "SPACE_EVENLY_CSS") => "SPACE_BETWEEN",
             _ => "MIN",
         };
         o.insert("primaryAxisAlignItems".into(), json!(main));
