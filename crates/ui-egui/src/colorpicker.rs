@@ -212,11 +212,13 @@ fn page_colors(app: &FigApp, ui: &Ui) -> Vec<Color> {
 /// Colour models the value row can show.
 const MODELS: [&str; 5] = ["Hex", "RGB", "HSL", "HSB", "CSS"];
 
-/// The model dropdown with its fields and the alpha field. Returns a committed colour.
-fn model_fields(ui: &mut Ui, c: Color) -> Option<Color> {
+/// The model dropdown with its fields and the alpha field. Returns a new colour and whether the
+/// edit is done (false while a field is being scrubbed).
+fn model_fields(ui: &mut Ui, c: Color) -> Option<(Color, bool)> {
     let model_id = Id::new("cp_model");
     let model: usize = ui.data(|d| d.get_temp(model_id)).unwrap_or(0).min(MODELS.len() - 1);
     let mut out: Option<Color> = None;
+    let mut done = true;
     ui.horizontal(|ui| {
         ui.add_space(16.0);
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -238,7 +240,8 @@ fn model_fields(ui: &mut Ui, c: Color) -> Option<Color> {
             w,
             1.0,
         ) {
-            Some(widgets::FieldEdit::Set(x)) | Some(widgets::FieldEdit::Scrub(x, _)) => Some(x),
+            Some(widgets::FieldEdit::Set(x)) => Some((x, true)),
+            Some(widgets::FieldEdit::Scrub(x, end)) => Some((x, end)),
             None => None,
         };
         match MODELS.get(model).copied().unwrap_or("Hex") {
@@ -246,7 +249,8 @@ fn model_fields(ui: &mut Ui, c: Color) -> Option<Color> {
                 let [r, g, b, _] = c.to_rgba8();
                 let vals = [f64::from(r), f64::from(g), f64::from(b)];
                 for (k, v) in vals.iter().enumerate() {
-                    if let Some(x) = num(ui, ["r", "g", "b"][k.min(2)], *v, 31.0) {
+                    if let Some((x, end)) = num(ui, ["r", "g", "b"][k.min(2)], *v, 31.0) {
+                        done = end;
                         let mut rgb = vals;
                         if let Some(slot) = rgb.get_mut(k) {
                             *slot = x.clamp(0.0, 255.0);
@@ -266,7 +270,8 @@ fn model_fields(ui: &mut Ui, c: Color) -> Option<Color> {
                 };
                 let vals = [f64::from(h), f64::from(s2) * 100.0, f64::from(l2) * 100.0];
                 for (k, v) in vals.iter().enumerate() {
-                    if let Some(x) = num(ui, ["h", "s", "l"][k.min(2)], *v, 31.0) {
+                    if let Some((x, end)) = num(ui, ["h", "s", "l"][k.min(2)], *v, 31.0) {
+                        done = end;
                         let mut v3 = vals;
                         if let Some(slot) = v3.get_mut(k) {
                             *slot = if k == 0 { x.rem_euclid(360.0) } else { x.clamp(0.0, 100.0) };
@@ -288,14 +293,20 @@ fn model_fields(ui: &mut Ui, c: Color) -> Option<Color> {
                 }
             }
         }
-        if MODELS.get(model) != Some(&"CSS")
-            && let Some(widgets::FieldEdit::Set(v)) =
-                widgets::number_field(ui, Id::new("cp_a"), widgets::Lead::None, Some((f64::from(out.unwrap_or(c).a) * 100.0).round()), "%", 44.0, 1.0)
-        {
-            out = Some(out.unwrap_or(c).with_alpha((v / 100.0).clamp(0.0, 1.0) as f32));
+        if MODELS.get(model) != Some(&"CSS") {
+            let alpha = Some((f64::from(out.unwrap_or(c).a) * 100.0).round());
+            let edit = match widgets::number_field(ui, Id::new("cp_a"), widgets::Lead::None, alpha, "%", 44.0, 1.0) {
+                Some(widgets::FieldEdit::Set(v)) => Some((v, true)),
+                Some(widgets::FieldEdit::Scrub(v, end)) => Some((v, end)),
+                None => None,
+            };
+            if let Some((v, end)) = edit {
+                done = end;
+                out = Some(out.unwrap_or(c).with_alpha((v / 100.0).clamp(0.0, 1.0) as f32));
+            }
         }
     });
-    out
+    out.map(|c| (c, done))
 }
 
 fn hue_color(ctx: &egui::Context, h: f32) -> Color32 {
@@ -744,11 +755,11 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
                     done |= d;
                 }
                 // Colour model fields (Hex, RGB, HSL, HSB or CSS) + alpha.
-                if let Some(c) = model_fields(ui, nc) {
+                if let Some((c, d)) = model_fields(ui, nc) {
                     nc = c;
                     hsb = Hsb::from_color(nc);
                     changed = true;
-                    done = true;
+                    done |= d;
                 }
                 ui.data_mut(|d| d.insert_temp(Id::new("cp_hsb"), (hsb.h, hsb.s, hsb.b, nc.to_rgba8())));
                 // A Display P3 colour sRGB can't show: the canvas (sRGB) shows the nearest one.
