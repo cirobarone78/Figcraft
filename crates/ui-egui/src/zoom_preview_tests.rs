@@ -322,14 +322,21 @@ fn drain(w: &mut Worker) -> Vec<(u64, bool)> {
 
 #[test]
 fn a_slow_first_render_gets_a_preview_beside_it_and_a_quick_one_none() {
-    // Slow: 2400² with glass and a background blur over the page, rendered from scratch.
-    let (mut s, rect) = document();
-    s.execute("effect.add", &json!({"ids": [rect], "type": "GLASS"})).unwrap();
-    s.execute("effect.add", &json!({"ids": [rect], "type": "BACKGROUND_BLUR"})).unwrap();
-    let ds = s.ds().unwrap();
-    let slow = job(&ds.doc, ds.page, ds.uid, view_at((300.0, 200.0), 2.0, 2400, 2400));
-    let fresh = render_now(&slow).unwrap();
-    assert!(fresh.ms > 50.0, "slow enough for a preview to beat it: {} ms", fresh.ms);
+    // Slow: a render from scratch that runs past the threshold, then the preview, with as much
+    // again to spare, so the preview comes first however fast this machine and the renderer are.
+    let view = view_at((300.0, 200.0), 2.0, 1200, 1200);
+    let mut want = 4.0 * PREVIEW_AFTER_MS;
+    let slow = loop {
+        let s = slow_scene(std::slice::from_ref(&view), want);
+        let ds = s.ds().unwrap();
+        let slow = job(&ds.doc, ds.page, ds.uid, view.clone());
+        let (full, preview) = (render_now(&slow).unwrap().ms, preview_with(&slow, &mut Retained::default()).unwrap().ms);
+        if full >= 2.0 * (PREVIEW_AFTER_MS + preview) {
+            break slow;
+        }
+        assert!(want < 64.0 * PREVIEW_AFTER_MS, "previews keep up with full renders: {preview} ms of {full} ms");
+        want *= 2.0;
+    };
     let mut w = Worker::new(egui::Context::default());
     w.submit(slow);
     assert_eq!(drain(&mut w), [(1, true), (1, false)], "the preview while it renders, then the refined image");
