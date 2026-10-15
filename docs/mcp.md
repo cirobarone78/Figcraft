@@ -1353,6 +1353,27 @@ through the outlines of its layers.
   clears it; no `preset` reads it). The desktop app reads pressure from pen input on Windows; in the
   browser from stylus touch events that report a force; macOS and Linux tablets report none.
 
+### Selection colors
+
+`selection.colors {ids?}` returns `{colors: [{paint, style, variable, targets}]}` across the
+selection and its descendants, deduplicating overlapping roots. Only visible solid and gradient
+paints are listed; masks and boolean operands are omitted. Styles and variables distinguish
+otherwise equal paints. Each target is `{id, fills, index, range}`; `range` is null for a node
+paint or `[start, end]` in character offsets for an effective text-range fill.
+
+Pass the returned target list to:
+
+- `selection.setPaint {targets, paint}` to replace only those slots (same paint syntax as `fill.set`).
+- `selection.selectColor {targets}` to select their distinct owning layers, without a document undo step.
+- `selection.applyColorStyle {targets, style}` to apply a document paint style. As with `style.apply`,
+  this replaces the matching node's entire fill/stroke list and links the style. Text ranges copy
+  resolved paints and keep their typography, without a paint-style link.
+
+Keep the targets fixed throughout a live interaction. A color becoming equal to another color
+must not add slots to the gesture. Invalid or missing targets fail atomically. Direct paint edits
+detach bindings on changed paint values (opacity alone keeps the color binding); a text-range edit preserves the node bindings other
+characters still inherit. Each mutating command is one undo step (an interaction can group them).
+
 ### Paint, effect and layout grid lists
 
 A layer's fills, strokes, effects and layout grids are lists kept **bottom first**: index 0 paints

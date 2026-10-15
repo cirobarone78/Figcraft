@@ -1,6 +1,6 @@
 # UI and interaction parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (fields select their text on focus; Typography spacing icons support scrubbing (#373); CSS colour names in hex fields; the Small caps sample in Type settings drawn from capitals; recent files as cards; vector edit mode: hovering, hatching, selecting and dragging filled regions; home screen: Templates tab, first-run templates and Getting started tips; number fields: scrub rates, arrow steps, arithmetic with brackets, relative edits of mixed values; outline mode's hidden layers and object bounds; Hide when publishing; cursors per tool and modifier; panel widths; dark pages for files made in the dark theme; drag threshold and double-clicks into text in groups; rotation origin on Alt+R and placing with Enter: no documented shortcut missing; keyboard shortcut parity suite and bindings; cursor chat and spotlight in live sessions; layers and assets panels behaviour suite and fixes; vector multi-edit and the vector edit tail; canvas navigation, guides and grids behaviour suite and fixes; shapes and vector behaviour suite and fixes; paint and effects behaviour suite and fixes; frames, groups, sections and masks behaviour suite and fixes; layers panel keyboard: F2 rename, Shift+F10 context menu, F8 box selection; selection and transform behaviour suite and fixes; Display P3: gamut warning and soft-proof (true P3 blocked upstream); several windows; boolean hit testing on the result, group drags, frame outlines and slices; outlines for the selection, mask outlines; arc fields, live boolean editing, shape builder on strokes, one-sided widths) · **Target:** Figma Design UI3 (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (Selection colors for mixed selections (#403); fields select their text on focus; Typography spacing icons support scrubbing (#373); CSS colour names in hex fields; the Small caps sample in Type settings drawn from capitals; recent files as cards; vector edit mode: hovering, hatching, selecting and dragging filled regions; home screen: Templates tab, first-run templates and Getting started tips; number fields: scrub rates, arrow steps, arithmetic with brackets, relative edits of mixed values; outline mode's hidden layers and object bounds; Hide when publishing; cursors per tool and modifier; panel widths; dark pages for files made in the dark theme; drag threshold and double-clicks into text in groups; rotation origin on Alt+R and placing with Enter: no documented shortcut missing; keyboard shortcut parity suite and bindings; cursor chat and spotlight in live sessions; layers and assets panels behaviour suite and fixes; vector multi-edit and the vector edit tail; canvas navigation, guides and grids behaviour suite and fixes; shapes and vector behaviour suite and fixes; paint and effects behaviour suite and fixes; frames, groups, sections and masks behaviour suite and fixes; layers panel keyboard: F2 rename, Shift+F10 context menu, F8 box selection; selection and transform behaviour suite and fixes; Display P3: gamut warning and soft-proof (true P3 blocked upstream); several windows; boolean hit testing on the result, group drags, frame outlines and slices; outlines for the selection, mask outlines; arc fields, live boolean editing, shape builder on strokes, one-sided widths) · **Target:** Figma Design UI3 (desktop app 126.10.7)
 
 Fine canvas control is what Figma users feel first: handles, snapping, nudging, modifier keys,
 drag behaviour, numeric precision. This checklist covers the tools, gestures and panels. Status:
@@ -109,6 +109,25 @@ interaction feel not yet compared.
 | Cursors per tool and modifier | done | the engine names a cursor for every tool, modifier and hover target (`tool.overlay.cursor`, tabled in `cursor_tests`) and the UI shows the system's or draws its own at the pointer (`cursors.rs`, `cursors_tests`; original glyphs from lines and the code-drawn icons). Arrow for Move and Scale; two-headed arrows on the handles that follow the handle and the box's rotation; outside a corner a curved rotate arrow turned to that corner, turning with the pointer while rotating; crosshair for the frame, section, slice, shape, pencil and Text tools; the I-beam over a text with the Text tool and over the text being edited; the pen as a cross with what a click does beside it (nothing: a new point; a ring: closes, connects to or goes on from a point; a plus: adds a point on a segment, also Alt in vector edit mode; a curve: bends, the Bend tool or Cmd/Ctrl); open and closed hand for the Hand tool, Space and the middle button; zoom in and out (Alt) while Z is held; eyedropper; comment pin; the copy cursor with Alt over a selected layer and while Alt-dragging; not-allowed while a drag resizes, rotates or moves a layer inside an instance (it is undone on release) and over a layers row that takes no drop. Ruler guides and gradient, crop and padding handles keep their own cursors (the tool's used to replace them). `ui.inspect` reports `cursor`. Left: no cursor for removing a point with the pen (the pen doesn't remove points); the drawn cursors follow the pointer a frame behind the system's; not compared with Figma's side by side |
 | Multiplayer cursors, cursor chat, spotlight | partial | in live sessions: named cursors, chat bubbles that fade, `/` to chat, spotlight from your avatar's menu with a banner; no audio or reactions |
 
+### Selection colors
+
+The Design panel shows Selection colors below Effects when the selection contains multiple
+paint groups. It includes solid fills and gradients, strokes, descendants and effective text
+range fills; images, patterns, hidden paints and masks are omitted. A boolean group's own paints
+are included, without its operands. Equal paints from different styles or variables stay separate.
+Each row edits the matching slots through the ordinary color picker or hex/opacity fields and
+can select their owning layers. A picker drag is one undo step and retains its original targets
+even when two colors become equal. Paint discovery is cached per document snapshot and selection;
+the rows are virtualized. During an interaction, the panel keeps its cached rows disabled and
+defers discovery until the gesture ends; selection commands still process all matching paints.
+
+Color styles already in the document (including imported styles) can be applied from a row.
+As with the existing Fill/Stroke style controls, applying a style replaces the matching layer's
+whole fill or stroke list and links it. A text range takes the style's resolved paints while
+keeping its typography; the document model has no paint-style link on character ranges.
+Browsing enabled libraries and binding/detaching variables from this section are not implemented;
+this is **partial** UI parity.
+
 ## Keyboard shortcuts
 
 One keymap (`figcraft_engine::keymap`) drives the menus, the canvas, the shortcuts panel, the
@@ -166,6 +185,7 @@ in the table. `crates/ui-egui/src/shortcut_keys_tests.rs` drives the keys a look
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Selection colors (#403): mixed-selection paint editing, color styles and select-by-color; engine and egui regression tests. Bounds and remaining parity are documented above; headline estimates unchanged. |
 | 2026-10-15 | minor | Hex fields take CSS colour names (`red` → `FF0000`): fills, strokes, effects, grids, variables, backgrounds and the colour picker |
 | 2026-10-15 | minor | Typography: drag the line-height, letter-spacing and paragraph-spacing icons to scrub their values; shared numeric-field rates, resize cursor and one Undo step per gesture (#373). |
 | 2026-10-15 | minor | A click or Tab into a one-line field selects all of its text (hex, inline, name, search and dialog fields); the first click into a fill's hex takes the keyboard |
