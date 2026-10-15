@@ -13,6 +13,7 @@ start with [`docs/gaps.md`](docs/gaps.md).
 
 | | Value | Kind |
 |---|---|---|
+| 2026-10-15 | minor | Connect an AI agent from the app (M0.9): Help ▸ Connect an AI agent (MCP) turns the control channel on without `--control`, optionally on every launch, and shows the client settings to copy. |
 | Menu/command breadth | **100%** (211 / 211) | measured, [`docs/parity-checklist.md`](docs/parity-checklist.md) (`cargo xtask parity`) |
 | Feature breadth | **~85%** (core editor ~94%) | estimated, [`docs/target-app-parity.md`](docs/target-app-parity.md) |
 | Ready for real work | **~53%** | estimated, same doc (written dimension weights and scores) |
@@ -131,6 +132,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Progress log
 
+- **2026-10-15** · Connect an AI agent from the app (M0.9): Help ▸ Connect an AI agent (MCP) turns the localhost control channel on without `--control` (`app.mcpStart`, port 7979 or the saved `mcp_port`), can turn it on every time FigCraft opens (`pref.mcpOnLaunch`), says why when the port is taken, and shows the MCP client settings with the path of the `figcraft-cli` next to the app or on `PATH`, ready to copy. Engine, UI and channel tests cover the commands, the window and a taken port. Numbers unchanged.
 - **2026-10-14** · Corner handles win over the corner-radius handles (M1, #292): a press on the inner half of a corner handle's square picked the radius handle 10 px in, so the drag neither resized nor (dragging outward) rounded anything. Inside the drawn square the corner now resizes both sides (in ratio with Shift or the link); further in the radius handle still answers. Regression test in the transform behaviour suite. Numbers unchanged.
 - **2026-10-14** · Home screen recent files as cards (M7): each card shows the picture its file carries on its first page's colour, the file's icon, name and "Edited ... ago"; sort by name, creation or last change either way; a table view; a click selects, a double-click or Enter opens, arrow keys move; Open, Show in folder and Remove from recents on right-click. Numbers unchanged.
 - **2026-10-13** · Vector edit mode regions (M4): with the Move tool, the filled area under the pointer is hatched with "/" lines in the selection colour, clipped by the area's own fill rule so holes stay clear; the hatch goes near points (3.5 px) and segments (2 px), and its spacing follows octave folding (8 px at every power-of-two zoom), fixed to the shape. A click selects the area with its points (they move with it but keep the unselected look), Shift adds or removes one, a press on a selected area drags the whole selection as one undo step, and a click on an empty spot clears the areas and stays in edit mode. `vector.edit.select {regions}` and `vector.edit.state` (`regions`, `regionVertices`, `regionHover`); `vector_regions_tests` and `regions_tests`. Numbers unchanged.

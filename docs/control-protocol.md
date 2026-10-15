@@ -7,6 +7,10 @@ sibling Crafting Apps) through a loopback socket:
 cargo run -p figcraft -- --control 7979 [file.figcraft|file.svg|image]
 ```
 
+Without a terminal, **Help ▸ Connect an AI agent (MCP)** turns the same channel on while the app
+runs (`app.mcpStart`, port 7979 unless the preferences say otherwise) and can turn it on every time
+the app opens (`pref.mcpOnLaunch`). One channel per app: once on, it stays on that port.
+
 The app listens on `127.0.0.1:<port>` only. Each connection carries **newline-delimited JSON**:
 one request object per line, one reply line per request, in order.
 

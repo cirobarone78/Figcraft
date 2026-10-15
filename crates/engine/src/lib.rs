@@ -608,7 +608,15 @@ pub struct Prefs {
     pub home_sort: String,
     /// Which way: `"desc"` (newest first, Z to A) or `"asc"`.
     pub home_order: String,
+    /// The AI agent (MCP) connection, the app's localhost control channel, turns on when the app
+    /// opens (Help ▸ Connect an AI agent; `--control` turns it on for one run).
+    pub mcp_on_launch: bool,
+    /// The port it listens on, on 127.0.0.1 ([`DEFAULT_MCP_PORT`] by default).
+    pub mcp_port: u16,
 }
+
+/// The port the AI agent (MCP) connection listens on unless the user picked another.
+pub const DEFAULT_MCP_PORT: u16 = 7979;
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -636,6 +644,8 @@ impl Default for Prefs {
             home_views: BTreeMap::new(),
             home_sort: "modified".into(),
             home_order: "desc".into(),
+            mcp_on_launch: false,
+            mcp_port: DEFAULT_MCP_PORT,
         }
     }
 }
@@ -1515,6 +1525,8 @@ mod live_tests;
 mod mask_tests;
 #[cfg(test)]
 mod masks_behaviour_tests;
+#[cfg(test)]
+mod mcp_pref_tests;
 #[cfg(test)]
 mod measure_tests;
 #[cfg(test)]
