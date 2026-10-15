@@ -87,6 +87,8 @@ mod cursors_tests;
 #[cfg(test)]
 mod dev_mode_tests;
 #[cfg(test)]
+mod duplicate_paint_tests;
+#[cfg(test)]
 mod export_preview_tests;
 #[cfg(test)]
 mod field_tests;
