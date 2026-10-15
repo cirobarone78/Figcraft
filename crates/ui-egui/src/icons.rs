@@ -83,6 +83,7 @@ icons! {
     FlipH,
     FlipV,
     CornerRadius,
+    Angle,
     IndependentCorners,
     LinkOn,
     LinkOff,
@@ -694,6 +695,11 @@ fn draw(p: &P, icon: Icon) {
             p.fill(&[(3.0, 9.0), (13.0, 9.0), (13.0, 14.0)]);
         }
         CornerRadius => p.corner(2.5, 2.5, 1.0, 1.0, 11.5, 6.0),
+        Angle => {
+            // Two rays from a vertex, the arc between them marking the angle.
+            p.poly(&[(13.5, 13.5), (2.5, 13.5), (10.5, 3.5)], false);
+            p.arc(2.5, 13.5, 6.0, (-10.0f32).atan2(8.0), 0.0);
+        }
         IndependentCorners => {
             for (x, y, dx, dy) in [(2.5, 2.5, 1.0, 1.0), (13.5, 2.5, -1.0, 1.0), (2.5, 13.5, 1.0, -1.0), (13.5, 13.5, -1.0, -1.0)] {
                 p.corner(x, y, dx, dy, 4.0, 2.0);

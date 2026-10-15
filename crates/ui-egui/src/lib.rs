@@ -125,6 +125,8 @@ mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
 #[cfg(test)]
+mod panel_fit_tests;
+#[cfg(test)]
 mod panel_reorder_tests;
 #[cfg(test)]
 mod panel_width_tests;
