@@ -27,6 +27,8 @@ pub static MENU: &[MenuItem] = &[
     m!("File", "New window", "window.new"),
     m!("File", "Open…", "file.open"),
     m!("File", "Import from file…", "file.import"),
+    // FigCraft's own public API import; excluded from the incumbent parity denominator.
+    m!("File", "Import from Figma…", "file.importFigma"),
     m!("File", "Place image…", "file.placeImage"),
     m!("File", SEP, ""),
     m!("File", "Save", "file.save"),
@@ -287,7 +289,7 @@ pub fn items() -> impl Iterator<Item = &'static MenuItem> {
 }
 
 /// Items of FigCraft's own that the parity count leaves out (as it does the `collab.` ones).
-const OWN: [&str; 2] = ["file.newFromTemplate", "help.gettingStarted"];
+const OWN: [&str; 3] = ["file.newFromTemplate", "file.importFigma", "help.gettingStarted"];
 
 /// Coverage: (implemented, total, missing ids). `extra` lists ids implemented by the UI layer.
 pub fn parity(extra: &[&str]) -> (usize, usize, Vec<&'static str>) {

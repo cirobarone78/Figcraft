@@ -60,7 +60,12 @@ fn close(a: f64, b: f64) -> bool {
 fn scene() -> (Session, NodeId, NodeId) {
     let mut s = Session::new();
     let r = id(&ex(&mut s, "shape.rectangle", json!({"x": 100, "y": 100, "width": 100, "height": 100})));
-    let t = id(&ex(&mut s, "text.create", json!({"text": "Hello", "x": 400, "y": 100, "props": {"fontSize": 40}})));
+    // Cursor hit targets use a fixed box so the optional fonts do not affect this fixture.
+    let t = id(&ex(
+        &mut s,
+        "text.create",
+        json!({"text": "Hello", "x": 400, "y": 100, "width": 120, "height": 48, "props": {"fontSize": 40, "width": 120, "height": 48, "textAutoResize": "none"}}),
+    ));
     ex(&mut s, "select.set", json!({"ids": [r]}));
     (s, r, t)
 }

@@ -14,6 +14,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod backend;
+mod figma;
 mod headless;
 mod prompts;
 mod resources;
@@ -24,6 +25,7 @@ mod tools;
 mod gradient_tests;
 
 pub use backend::{Attached, Backend, decode_data, page_children};
+pub use figma::import_figma;
 pub use headless::Headless;
 pub use prompts::{PROMPTS, PromptArg, PromptDef};
 pub use resources::{COMMAND_TEMPLATE, COMMANDS_URI, DOC_URI, NODE_TEMPLATE};

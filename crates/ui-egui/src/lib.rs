@@ -22,6 +22,7 @@ pub mod dev_mode;
 pub mod dialogs;
 pub mod export_panel;
 pub mod field_math;
+pub mod figma_import;
 pub mod font_preview;
 pub mod frame_labels;
 pub mod frame_presets;
@@ -32,6 +33,7 @@ pub mod home;
 pub mod home_recents;
 pub mod i18n;
 pub mod icons;
+pub mod import_report;
 pub mod layers;
 pub mod layout_panel;
 pub mod list_drag;
@@ -40,6 +42,7 @@ pub mod live_text;
 pub mod measure_overlay;
 pub mod menus;
 pub mod online;
+pub mod pending_open;
 pub mod plugins_ui;
 pub mod present;
 pub mod proto_canvas;
@@ -89,6 +92,8 @@ mod home_recents_tests;
 mod home_tests;
 #[cfg(test)]
 mod idle_tests;
+#[cfg(test)]
+mod import_report_tests;
 #[cfg(test)]
 mod layers_behaviour_tests;
 #[cfg(test)]
@@ -140,6 +145,8 @@ mod proto_reorder_tests;
 #[cfg(test)]
 mod proto_responsive_tests;
 #[cfg(test)]
+mod save_as_tests;
+#[cfg(test)]
 mod shortcut_keys_tests;
 #[cfg(test)]
 mod shortcuts_tests;
@@ -155,7 +162,7 @@ mod windows_qa_tests;
 mod windows_tests;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use figcraft_doc::NodeId;
 use figcraft_engine::Session;
@@ -336,6 +343,15 @@ pub struct UiState {
     pub follow_system: bool,
     pub tool_flyout: Option<&'static str>,
     pub last_error: Option<String>,
+    /// The latest successful file import's summary and compatibility notes.
+    pub import_report: Option<import_report::Report>,
+    /// A desktop Figma import; its token is never part of `ui.inspect` or preferences.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub figma_import: Option<figma_import::Dialog>,
+    /// Files dropped on the home screen or the canvas, opened once their card has been on screen
+    /// ([`pending_open::pending_opens`]), and the frames it has been drawn.
+    pub pending_opens: Vec<pending_open::PendingOpen>,
+    pub pending_open_frames: u8,
     pub screenshot_requests: Vec<(u64, String)>,
     pub frame_ms: f64,
     pub render_ms: f64,
@@ -436,6 +452,11 @@ impl Default for UiState {
             follow_system: false,
             tool_flyout: None,
             last_error: None,
+            import_report: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            figma_import: None,
+            pending_opens: Vec::new(),
+            pending_open_frames: 0,
             screenshot_requests: Vec::new(),
             frame_ms: 0.0,
             render_ms: 0.0,
@@ -537,7 +558,11 @@ impl FigApp {
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
         let r = self.session.execute(id, &params);
         self.handle_ui_requests();
-        r.map_err(|e| self.failed(id, &e)).ok()
+        let result = r.map_err(|e| self.failed(id, &e)).ok();
+        if let Some(result) = &result {
+            import_report::capture(self, id, result);
+        }
+        result
     }
 
     /// Show command `id`'s error.
@@ -682,6 +707,7 @@ impl FigApp {
                     self.services.save_prefs(&self.session.prefs);
                 }
                 "dialog.saveAs" => self.save_as_dialog(),
+                "dialog.importFigma" => figma_import::open(self),
                 "dialog.colorProfile" => self.ui.color_profile = self.session.doc().ok().map(|d| d.color_profile),
                 "present" => {
                     if let Some(start) = r.data.get("start").and_then(figcraft_engine::params::id_of) {
@@ -789,19 +815,46 @@ impl FigApp {
     }
 
     pub fn save_as_dialog(&mut self) {
-        let name = self.session.doc().map(|d| d.name.clone()).unwrap_or_else(|_| "Untitled".into());
-        if let Some(p) = self.services.pick_save(i18n::tr("Save as"), &format!("{name}.figcraft"), &["figcraft"]) {
-            let ps = p.to_string_lossy().to_string();
-            if self.run("file.saveAs", json!({"path": ps})).is_some() {
-                self.toast(i18n::trf("Saved {name}", &[("name", &p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default())]));
+        let Ok(name) = self.session.doc().map(|d| d.name.clone()) else { return };
+        // A dotted name ("Brand v1.2") already looks like it has an extension, so the system dialog wouldn't add one.
+        let suggested = if Path::new(&name).extension().is_some_and(|e| !e.is_empty()) { format!("{name}.figcraft") } else { name };
+        let Some(mut p) = self.services.pick_save(i18n::tr("Save as"), &suggested, &["figcraft", "fig"]) else { return };
+        if p.extension().is_none_or(|e| e.is_empty()) {
+            if !p.set_extension("figcraft") {
+                self.toast(i18n::tr("Use the .figcraft or .fig extension."));
+                return;
             }
+            // This name wasn't confirmed by the system dialog: don't replace an existing file.
+            match p.try_exists() {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.toast(i18n::tr("A .figcraft file with this name already exists. Choose its full name to confirm replacement."));
+                    return;
+                }
+                Err(e) => {
+                    self.toast(e.to_string());
+                    return;
+                }
+            }
+        } else if !p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("figcraft") || e.eq_ignore_ascii_case("fig")) {
+            self.toast(i18n::tr("Use the .figcraft or .fig extension."));
+            return;
+        }
+        if let Some(r) = self.run("file.saveAs", json!({"path": p.to_string_lossy()})) {
+            dialogs::file_saved(self, &r);
         }
     }
 
     pub fn save(&mut self) {
         // A branch tab saves its main file.
         let tab = figcraft_engine::branches::file_tab(&self.session);
-        if self.session.docs.get(tab).is_some_and(|d| d.path.is_some()) {
+        let native_path = self
+            .session
+            .docs
+            .get(tab)
+            .and_then(|d| d.path.as_deref())
+            .is_some_and(|path| !Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("fig")));
+        if native_path {
             if self.run("file.save", json!({})).is_some() {
                 self.toast(i18n::tr("Saved"));
             }
@@ -811,9 +864,7 @@ impl FigApp {
     }
 
     pub fn open_dialog(&mut self) {
-        if let Some(p) =
-            self.services.pick_open(i18n::tr("Open"), &["figcraft", "fig", "json", "svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"])
-        {
+        if let Some(p) = self.services.pick_open(i18n::tr("Open"), OPEN_EXTENSIONS) {
             let ps = p.to_string_lossy().to_string();
             if self.run("file.open", json!({"path": ps})).is_some() {
                 self.ui.home = false;
@@ -825,7 +876,7 @@ impl FigApp {
         let exts: &[&str] = if place {
             &["png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"]
         } else {
-            &["svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "figcraft", "fig"]
+            &["svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "figcraft", "fig", "json"]
         };
         if let Some(p) = self.services.pick_open(if place { i18n::tr("Place image") } else { i18n::tr("Import") }, exts) {
             let ps = p.to_string_lossy().to_string();
@@ -985,6 +1036,8 @@ impl FigApp {
         // The Inspect tab measures on hover without Alt.
         self.session.tool.redlines = self.ui.right_tab == RightTab::Inspect;
         if self.ui.present.is_some() {
+            // Keep draining a running Figma import so its worker never blocks on a full channel.
+            figma_import::poll(self, &ctx);
             present::show(self, ui);
             // What went wrong while presenting (a widget's plugin failing) shows over it.
             self.toast_ui(&ctx);
@@ -1134,7 +1187,7 @@ impl FigApp {
 
     /// UI state as JSON (control channel `ui.inspect`).
     pub fn inspect(&self) -> Value {
-        json!({
+        let mut state = json!({
             "rightTab": self.ui.right_tab,
             "leftTab": self.ui.left_tab,
             "home": self.ui.home,
@@ -1190,6 +1243,51 @@ impl FigApp {
             "panels": {"left": self.ui.left_width, "right": self.ui.right_width, "leftCollapsed": self.ui.left_collapsed},
             "status": self.session.status(),
             "lastError": self.ui.last_error,
-        })
+        });
+        state["figmaImport"] = figma_import::inspect(self);
+        state["pendingOpens"] = json!(self.ui.pending_opens.len());
+        state["importReport"] = json!(self.ui.import_report.as_ref().map(import_report::Report::inspect));
+        state
     }
+}
+
+/// The file types File ▸ Open and a drop on the home screen open.
+pub(crate) const OPEN_EXTENSIONS: &[&str] = &["figcraft", "fig", "json", "svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"];
+
+/// Whether `path` names a file type that opens as a document (the extension, in any case).
+pub(crate) fn opens(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| OPEN_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// The contents of a dropped file that has no file on disk to read by path.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
+    f.bytes().ok()
+}
+
+/// The contents of a dropped file that has no file on disk to read by path.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn dropped_bytes(_f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
+    // Browser drops arrive asynchronously; not supported yet.
+    None
+}
+
+/// While files are dragged over the window: a tinted, outlined `rect` with `label` in its middle,
+/// over everything else, saying what a drop does there.
+pub(crate) fn drop_overlay(ctx: &egui::Context, rect: egui::Rect, label: &str) {
+    if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+        return;
+    }
+    let t = theme::Tokens::get(ctx);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_overlay")));
+    let area = rect.shrink(4.0);
+    painter.rect_filled(area, egui::CornerRadius::same(8), t.accent.gamma_multiply(0.12));
+    painter.rect_stroke(area, egui::CornerRadius::same(8), egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+    let galley = painter.layout_no_wrap(label.to_owned(), theme::semibold(14.0), t.text);
+    let pill = egui::Rect::from_center_size(area.center(), galley.size() + egui::vec2(32.0, 16.0));
+    painter.rect_filled(pill, egui::CornerRadius::same(8), t.panel);
+    painter.rect_stroke(pill, egui::CornerRadius::same(8), egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+    painter.galley(pill.center() - galley.size() / 2.0, galley, t.text);
+    // Hovering sends no pointer events on every platform: keep the overlay current.
+    ctx.request_repaint();
 }

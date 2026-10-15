@@ -929,6 +929,21 @@ pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Respons
     resp
 }
 
+/// A button for a destructive or stopping action (Cancel of a running import): the primary
+/// button's size and rounding, filled with the danger colour.
+pub fn danger_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let galley = ui.painter().layout_no_wrap(label.to_string(), regular(11.0), Color32::WHITE);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, FIELD_H), sense);
+    a11y::button(&resp, label);
+    let fill = if enabled && resp.hovered() { t.danger.lerp_to_gamma(Color32::BLACK, 0.12) } else { t.danger };
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.4) };
+    ui.painter().rect_filled(rect, CornerRadius::same(5), dim(fill));
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, regular(11.0), dim(Color32::WHITE));
+    resp
+}
+
 /// Text in a row.
 pub fn label(ui: &mut Ui, text: &str, color: Color32) {
     ui.label(egui::RichText::new(text).font(regular(11.0)).color(color));

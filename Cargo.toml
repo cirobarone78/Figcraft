@@ -30,13 +30,14 @@ figcraft-engine = { path = "crates/engine" }
 figcraft-ui-egui = { path = "crates/ui-egui" }
 figcraft-mcp = { path = "crates/mcp" }
 figcraft-collab-net = { path = "crates/collab-net" }
+figcraft-figma-net = { path = "crates/figma-net" }
 figcraft-plugin = { path = "crates/plugin" }
 
 # foundation
 kurbo = { version = "0.13", features = ["serde"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "unbounded_depth"] }
 regex = "1.13"
 log = "0.4"
 proptest = "1"

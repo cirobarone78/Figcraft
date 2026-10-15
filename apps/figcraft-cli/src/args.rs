@@ -38,7 +38,9 @@ impl Args {
             } else if flags.contains(&name) && inline.is_none() {
                 a.flags.push(name.to_string());
             } else {
-                return Err(CliError::Usage(format!("unknown option `{arg}`")));
+                // Name the option only: an inline value may be a secret (`--figma-token=…`).
+                let option = arg.split('=').next().unwrap_or(arg);
+                return Err(CliError::Usage(format!("unknown option `{option}`")));
             }
         }
         Ok(a)
@@ -110,6 +112,12 @@ mod tests {
         assert_eq!(a.value("o").as_deref(), Some("out"));
         assert_eq!(a.scale().unwrap(), 2.0);
         assert!(a.flag("json"));
+    }
+
+    #[test]
+    fn unknown_options_never_echo_their_inline_value() {
+        let Err(CliError::Usage(message)) = Args::parse(&v(&["--figma-token=figd_SECRET"]), &["o"], &[]) else { panic!("accepted") };
+        assert!(message.contains("--figma-token") && !message.contains("SECRET"), "{message}");
     }
 
     #[test]

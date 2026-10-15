@@ -1,6 +1,7 @@
 //! `figcraft-cli`: FigCraft without a window. Inspect, export, convert and render documents, run
 //! command scripts, list commands, serve MCP on stdio, publish plugins to a server's plugin
 //! directory and measure performance.
+//! Figma URL imports use the public REST API with a process-scoped token.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod args;
@@ -20,6 +21,7 @@ USAGE:
   figcraft-cli export <file> -o <out> [--format png|jpg|svg|webp|pdf|fig] [--scale N] [--page NAME] [--node ID|NAME]
                       [--bleed LENGTH] [--crop-marks] [--bleed-marks] [--cmyk]
   figcraft-cli convert <in> <out>
+  figcraft-cli import-figma <Figma-Design-URL> -o <out.figcraft>
   figcraft-cli render <file> -o <out.png> [--scale N] [--page NAME]
   figcraft-cli run <script.json|script.jsonl> [--in <file>] [--out <file>]
   figcraft-cli commands [--json] [--filter TEXT]
@@ -56,6 +58,33 @@ fn main() -> ExitCode {
             eprintln!("error: {msg}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod figma_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().chain([&"--no-system-fonts"]).map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn import_requires_a_native_output_path() {
+        let result = run(&args(&["import-figma", "https://www.figma.com/design/abc/File", "-o", "out.png"]));
+        assert!(matches!(result, Err(CliError::Usage(message)) if message.contains(".figcraft")));
+    }
+
+    #[test]
+    fn invalid_import_link_fails_before_authentication() {
+        let result = run(&args(&["import-figma", "https://example.com/design/abc/File", "-o", "out.figcraft"]));
+        assert!(matches!(result, Err(CliError::Failed(message)) if message.starts_with("Invalid Figma link")));
+    }
+
+    #[test]
+    fn import_rejects_token_flags_without_echoing_the_value() {
+        let result = run(&args(&["import-figma", "https://www.figma.com/design/abc/File", "-o", "out.figcraft", "--token=synthetic-secret"]));
+        assert!(matches!(result, Err(CliError::Usage(message)) if !message.contains("synthetic-secret") && message.contains("FIGCRAFT_FIGMA_TOKEN")));
     }
 }
 
@@ -112,6 +141,22 @@ fn run(argv: &[String]) -> CliResult<ExitCode> {
                 [i, o] => files::convert(i, o),
                 _ => Err(CliError::Usage("convert <in> <out>".into())),
             }
+        }
+        "import-figma" => {
+            if rest.iter().any(|arg| matches!(arg.split('=').next(), Some("--token" | "--access-token" | "--pat"))) {
+                return Err(CliError::Usage("Figma credentials belong in FIGCRAFT_FIGMA_TOKEN, never in command arguments".into()));
+            }
+            let a = Args::parse(rest, &["o", "out"], &[])?;
+            let url = a.one_positional("import-figma <Figma-Design-URL> -o <out.figcraft>")?;
+            let out = a.value("o").or_else(|| a.value("out")).ok_or_else(|| CliError::Usage("import-figma needs -o <out.figcraft>".into()))?;
+            if !std::path::Path::new(&out).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("figcraft")) {
+                return Err(CliError::Usage("import-figma output must end in .figcraft".into()));
+            }
+            let mut backend = figcraft_mcp::Headless::new();
+            let report = figcraft_mcp::import_figma(&mut backend, &url).map_err(CliError::Failed)?;
+            backend.session.execute("file.save", &json!({"path": out})).map_err(|e| CliError::Failed(e.to_string()))?;
+            println!("{}", json!({"path": out, "import": report}));
+            Ok(ExitCode::SUCCESS)
         }
         "render" => {
             let a = Args::parse(rest, &["o", "out", "scale", "page"], &[])?;

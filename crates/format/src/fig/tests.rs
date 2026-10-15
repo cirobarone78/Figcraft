@@ -384,6 +384,132 @@ fn fixture() -> Vec<u8> {
     zip_file(&canvas(&schema(), &message()))
 }
 
+#[test]
+fn archive_images_share_count_and_byte_budgets() {
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, bytes) in [("canvas.fig", b"fig-kiwi".to_vec()), ("images/ab", png()), ("images/cd", png())] {
+        z.start_file(name, stored).unwrap();
+        z.write_all(&bytes).unwrap();
+    }
+    let bytes = z.finish().unwrap().into_inner();
+    let hash = "ab";
+    let archive = Archive::open(&bytes).unwrap();
+    assert!(archive.image("ef").is_none());
+    assert_eq!(archive.image_count.get(), 0, "missing members do not spend the budget");
+    let image = archive.image(hash).unwrap();
+    assert_eq!(archive.image_bytes.get(), image.len() as u64);
+    assert_eq!(archive.image_count.get(), 1);
+    assert!(!archive.image_limits_hit.get());
+
+    let archive = Archive::open(&bytes).unwrap();
+    archive.image_count.set(MAX_IMAGES);
+    assert!(archive.image(hash).is_none());
+    assert!(archive.image_limits_hit.get());
+    assert_eq!(archive.image_bytes.get(), 0);
+
+    let archive = Archive::open(&bytes).unwrap();
+    let used = MAX_IMAGE_BYTES - image.len() as u64 + 1;
+    archive.image_bytes.set(used);
+    assert!(archive.image(hash).is_none(), "members are refused before allocation when the total budget is exhausted");
+    assert!(archive.image_limits_hit.get());
+    assert_eq!(archive.image_bytes.get(), used);
+
+    let archive = Archive::open(&bytes).unwrap();
+    archive.image_bytes.set(MAX_IMAGE_BYTES - image.len() as u64);
+    assert!(archive.image(hash).is_some(), "the exact remaining budget is valid");
+    assert_eq!(archive.image_bytes.get(), MAX_IMAGE_BYTES);
+    assert!(archive.image(hash).is_some(), "reusing a member does not spend the budget twice");
+    assert_eq!(archive.image_bytes.get(), MAX_IMAGE_BYTES);
+    assert_eq!(archive.image_count.get(), 1);
+    assert!(!archive.image_limits_hit.get());
+    archive.image_count.set(MAX_IMAGES);
+    assert!(archive.image(hash).is_some(), "a known member is valid after reaching the count limit");
+    archive.image_count.set(1);
+    assert!(archive.image("cd").is_none());
+    assert!(archive.image_limits_hit.get());
+}
+
+/// A small legacy bare canvas with an image referenced through the message's blob table.
+fn embedded_canvas(hash: &[u8], index: u64, image: Vec<u8>) -> Vec<u8> {
+    let schema = Schema::parse(
+        "enum NodeType DOCUMENT CANVAS RECTANGLE
+         enum PaintType IMAGE
+         struct GUID uint sessionID, uint localID
+         struct Vector float x, float y
+         message Image byte[] hash, uint dataBlob
+         message Paint PaintType type, Image image
+         message ParentIndex GUID guid, string position
+         message NodeChange GUID guid, ParentIndex parentIndex, NodeType type, string name, Vector size, Paint[] fillPaints
+         struct Blob byte[] bytes
+         message Message NodeChange[] nodeChanges, Blob[] blobs",
+    )
+    .unwrap();
+    let paint = o(vec![("type", e("IMAGE")), ("image", o(vec![("hash", Kv::Bytes(hash.to_vec())), ("dataBlob", u(index))]))]);
+    let nodes = vec![
+        node(0, None, "DOCUMENT", "Embedded", vec![]),
+        node(1, Some((0, "!")), "CANVAS", "Page", vec![]),
+        node(2, Some((1, "!")), "RECTANGLE", "Photo", vec![("size", xy(2.0, 1.0)), ("fillPaints", arr(vec![paint]))]),
+    ];
+    let mut bytes = canvas(&schema, &o(vec![("nodeChanges", arr(nodes)), ("blobs", arr(vec![o(vec![("bytes", Kv::Bytes(image))])]))]));
+    bytes[8..12].copy_from_slice(&4u32.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn bare_canvas_embedded_images_import() {
+    let image = png();
+    let bytes = embedded_canvas(&HASH, 0, image.clone());
+    let (doc, warnings) = import(&bytes, "Embedded.fig").unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(doc.images.len(), 1);
+    let imported = doc.images.values().next().unwrap();
+    assert_eq!((imported.width, imported.height), (2, 1));
+    assert_eq!(imported.bytes.as_slice(), image.as_slice());
+}
+
+#[test]
+fn embedded_images_fill_missing_members_but_archive_members_win() {
+    // A valid ZIP member takes precedence even when the embedded bytes aren't an image.
+    let bytes = zip_file(&embedded_canvas(&HASH, 0, b"not an image".to_vec()));
+    let (doc, warnings) = import(&bytes, "Priority.fig").unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(doc.images.values().next().unwrap().bytes.as_slice(), png().as_slice());
+    // This image's hash has no member in the ZIP, so its embedded blob is used instead.
+    let bytes = zip_file(&embedded_canvas(&[0xcd; 20], 0, png()));
+    let (doc, warnings) = import(&bytes, "Fallback.fig").unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(doc.images.values().next().unwrap().bytes.as_slice(), png().as_slice());
+}
+
+#[test]
+fn embedded_images_share_the_resolver_budgets() {
+    let image = png();
+    let archive = Archive::open(b"fig-kiwi").unwrap();
+    archive.image_bytes.set(MAX_IMAGE_BYTES - image.len() as u64);
+    assert!(archive.resolve_image("ab", Some(&image)).is_some());
+    assert!(archive.resolve_image("ab", Some(&image)).is_some(), "a shared embedded image is charged once");
+    assert_eq!(archive.image_bytes.get(), MAX_IMAGE_BYTES);
+    assert_eq!(archive.image_count.get(), 1);
+    assert!(archive.resolve_image("cd", Some(&image)).is_none());
+    assert!(archive.image_limits_hit.get());
+
+    let archive = Archive::open(b"fig-kiwi").unwrap();
+    archive.image_count.set(MAX_IMAGES);
+    assert!(archive.resolve_image("ab", Some(&image)).is_none());
+    assert_eq!(archive.image_bytes.get(), 0);
+    assert!(archive.image_limits_hit.get());
+}
+
+#[test]
+fn invalid_embedded_image_indexes_use_placeholders() {
+    let bytes = embedded_canvas(&HASH, u64::from(u32::MAX), png());
+    let (doc, warnings) = import(&bytes, "Bad-index.fig").unwrap();
+    assert!(warnings.iter().any(|w| w.contains("grey placeholder")));
+    assert_eq!(doc.images.len(), 1);
+    assert_ne!(doc.images.values().next().unwrap().width, 2);
+}
+
 fn named<'d>(doc: &'d figcraft_doc::Document, name: &str) -> &'d figcraft_doc::Node {
     doc.nodes().find(|n| n.name == name).unwrap_or_else(|| panic!("no layer {name}"))
 }
@@ -596,7 +722,7 @@ fn mangled_kiwi_never_panics() {
             m[i] = r.next() as u8;
         }
         if let Ok(kv) = sc.decode_message(root, &m) {
-            let (json, _) = map::to_rest(&kv, "x");
+            let (json, _) = map::to_rest(&kv, "x").unwrap();
             let _ = crate::rest::import(&json, &crate::rest::no_images);
         }
         let mut sbytes = schema_bytes.clone();
@@ -711,7 +837,7 @@ fn dump_samples() {
         std::fs::write(format!("{out}/{stem}.schema.txt"), txt).unwrap();
         let msg = schema.decode_message(schema.find("Message").unwrap(), &message).unwrap();
         std::fs::write(format!("{out}/{stem}.json"), serde_json::to_string_pretty(&debug_json(&msg)).unwrap()).unwrap();
-        let (rest, _) = map::to_rest(&msg, &stem);
+        let (rest, _) = map::to_rest(&msg, &stem).unwrap();
         std::fs::write(format!("{out}/{stem}.rest.json"), serde_json::to_string_pretty(&rest).unwrap()).unwrap();
     }
 }

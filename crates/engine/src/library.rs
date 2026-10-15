@@ -1201,9 +1201,16 @@ pub fn check_read_only(cmd: &str, before: &Document, after: &Document) -> std::r
     if !variables_unchanged(before, after) {
         return Err(READ_ONLY.into());
     }
-    let Some(store) = after.library_store().or_else(|| before.library_store()) else { return Ok(()) };
-    let touched = |d: &Document, id: NodeId| d.contains(id) && d.page_of(id) == Some(store);
-    if after.dirty().iter().any(|id| touched(before, *id) || touched(after, *id)) {
+    let changed_remote = |id| {
+        if !before.is_remote(id) && !after.is_remote(id) {
+            return false;
+        }
+        match (before.node_arc(id), after.node_arc(id)) {
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            _ => true,
+        }
+    };
+    if after.dirty().iter().any(|id| changed_remote(*id)) {
         return Err(READ_ONLY.into());
     }
     Ok(())

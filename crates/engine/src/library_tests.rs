@@ -45,6 +45,82 @@ fn path_str(p: &std::path::Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+fn dirty_library_document() -> (Document, NodeId) {
+    let mut doc = Document::new("Dirty library cache");
+    let store = doc.ensure_library_store();
+    let remote = doc.alloc_id();
+    doc.insert(Node::new(remote, NodeKind::Frame, "Remote", 10.0, 10.0), store, None).unwrap();
+    (doc, remote)
+}
+
+#[test]
+fn page_history_restores_stale_instance_geometry_without_opening_instance_edits() {
+    let mut s = Session::new();
+    let main = idv(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 100, "height": 40, "name": "Main"})));
+    let main_child = idv(&ex(&mut s, "text.create", json!({"text": "Label", "x": 4, "y": 5, "parent": main})));
+    let component = idv(&ex(&mut s, "component.create", json!({"ids": [main]})));
+    let instance = idv(&ex(&mut s, "instance.create", json!({"component": component, "x": 20, "y": 30})));
+    let instance_child = node(&s, instance).children[0];
+    let original = node(&s, instance_child);
+    assert_eq!(original.source, Some(main_child));
+    let original_geometry = (original.transform, original.width, original.height);
+    let original_source = original.source;
+    let page_count = s.doc().unwrap().pages.len();
+    let history_count = s.undo_depth().0;
+
+    ex(&mut s, "page.add", json!({"name": "Second"}));
+    assert_eq!(s.doc().unwrap().pages.len(), page_count + 1);
+    assert_eq!(s.undo_depth(), (history_count + 1, 0));
+    // Cached imports can carry a pending snapshot whose instance geometry predates normalization.
+    let mut historical = (*s.ds().unwrap().history.undo.last().unwrap().doc).clone();
+    historical.get_mut(instance_child).unwrap().width += 12.0;
+    historical.mark_dirty([instance_child]);
+    let historical = Arc::new(historical);
+    s.ds_mut().unwrap().history.undo.last_mut().unwrap().doc = historical.clone();
+    ex(&mut s, "edit.undo", json!({}));
+    assert_eq!(s.doc().unwrap().pages.len(), page_count);
+    assert!(Arc::ptr_eq(&s.ds().unwrap().doc, &historical));
+    let restored = node(&s, instance_child);
+    assert_eq!((restored.transform, restored.width, restored.height), (original_geometry.0, original_geometry.1 + 12.0, original_geometry.2));
+    assert_eq!(restored.source, original_source);
+    assert!(s.doc().unwrap().dirty().contains(&instance_child));
+    assert_eq!(s.undo_depth(), (history_count, 1));
+
+    ex(&mut s, "edit.redo", json!({}));
+    assert_eq!(s.doc().unwrap().pages.len(), page_count + 1);
+    assert_eq!(s.undo_depth(), (history_count + 1, 0));
+    let child_before_edit = node(&s, instance_child);
+    let history_before_edit = s.undo_depth();
+    let revision_before_edit = s.ds().unwrap().revision;
+    assert!(s.execute("node.set", &json!({"id": instance_child, "props": {"width": child_before_edit.width + 10.0}})).is_err());
+    assert_eq!(s.undo_depth(), history_before_edit);
+    assert_eq!(s.ds().unwrap().revision, revision_before_edit);
+    assert_eq!((node(&s, instance_child).width, node(&s, instance_child).height), (child_before_edit.width, child_before_edit.height));
+}
+
+#[test]
+fn read_only_allows_unchanged_predirty_remote_nodes() {
+    let (before, remote) = dirty_library_document();
+    assert!(before.dirty().contains(&remote));
+
+    let mut after = before.clone();
+    after.add_page("Unrelated page");
+    assert!(after.dirty().contains(&remote), "the imported remote node remains in the pending dirty set");
+    check_read_only("page.add", &before, &after).unwrap();
+
+    let mut edited = before.clone();
+    edited.get_mut(remote).unwrap().opacity = 0.5;
+    assert_eq!(check_read_only("node.set", &before, &edited), Err(READ_ONLY.into()));
+
+    let mut moved = before.clone();
+    moved.reparent(remote, before.first_page().unwrap(), None).unwrap();
+    assert_eq!(check_read_only("node.reparent", &before, &moved), Err(READ_ONLY.into()));
+
+    let mut deleted = before.clone();
+    deleted.remove(remote).unwrap();
+    assert_eq!(check_read_only("edit.delete", &before, &deleted), Err(READ_ONLY.into()));
+}
+
 /// The library file's layers.
 struct Kit {
     button: NodeId,
@@ -179,8 +255,16 @@ fn add_place_and_update_keep_overrides() {
         NodeKind::Instance { component, .. } => component,
         _ => panic!("not an instance"),
     };
+    let unchanged = s.doc().unwrap().clone();
     let e = s.execute("node.set", &json!({"id": remote_button, "props": {"fill": "#ff0000"}})).unwrap_err();
     assert!(e.to_string().contains("can't be edited"), "{e}");
+    assert_eq!(s.doc().unwrap(), &unchanged, "a refused remote edit rolls back");
+    for (cmd, args) in
+        [("node.reparent", json!({"ids": [remote_button], "parent": s.page().unwrap()})), ("edit.delete", json!({"ids": [remote_button]}))]
+    {
+        assert!(s.execute(cmd, &args).is_err(), "{cmd} must preserve read-only copies");
+        assert_eq!(s.doc().unwrap(), &unchanged, "refused {cmd} rolls back");
+    }
     let style = s.doc().unwrap().styles[0].id.clone();
     assert!(s.execute("style.update", &json!({"style": style, "name": "Mine"})).is_err());
     assert!(s.execute("style.delete", &json!({"style": style})).is_err());

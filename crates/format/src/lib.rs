@@ -442,15 +442,40 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Document, Vec<String>), FormatError> 
 pub(crate) fn read_member<R: Read + Seek>(z: &mut zip::ZipArchive<R>, name: &str, limit: u64) -> Result<Vec<u8>, FormatError> {
     let f = z.by_name(name).map_err(|e| FormatError::Corrupt(format!("{name}: {e}")))?;
     let too_large = || FormatError::Corrupt(format!("{name} is too large"));
-    if f.size() > limit {
+    let size = f.size();
+    if size > limit {
         return Err(too_large());
     }
-    let mut data = Vec::new();
-    f.take(limit.saturating_add(1)).read_to_end(&mut data).map_err(|e| FormatError::Corrupt(format!("{name}: {e}")))?;
-    if data.len() as u64 > limit {
-        return Err(too_large());
+    read_capped(f, limit, size).map_err(|e| FormatError::Corrupt(format!("{name}: {e}")))?.ok_or_else(too_large)
+}
+
+/// Read `r` to its end; `None` when it holds more than `limit` bytes. The buffer starts at `hint`
+/// bytes and grows in bounded steps, never past `limit`, so an oversized stream (or a wrong
+/// declared size) can't double the allocation beyond the cap, and running out of memory is an
+/// error rather than an abort.
+pub(crate) fn read_capped(mut r: impl Read, limit: u64, hint: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(usize::try_from(hint).unwrap_or(usize::MAX).min(limit)).map_err(std::io::Error::other)?;
+    let mut buf = [0u8; 32 * 1024];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => return Ok(Some(out)),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let Some(chunk) = buf.get(..n) else { return Err(std::io::Error::other("read past the buffer")) };
+        let len = out.len().saturating_add(n);
+        if len > limit {
+            return Ok(None);
+        }
+        if out.capacity() < len {
+            let grown = out.capacity().saturating_mul(2).max(len).min(limit);
+            out.try_reserve_exact(grown - out.len()).map_err(std::io::Error::other)?;
+        }
+        out.extend_from_slice(chunk);
     }
-    Ok(data)
 }
 
 /// Read a `.figcraft` archive (or bare JSON) with its version history.

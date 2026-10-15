@@ -12,6 +12,8 @@
 //! tables, …) come in as the closest frames, text and vectors. Anything not understood is skipped
 //! with a warning; malformed input never panics.
 
+#[cfg(test)]
+mod decoder_regression_tests;
 mod export;
 #[cfg(test)]
 mod export_tests;
@@ -21,8 +23,25 @@ pub mod kiwi;
 mod map;
 mod network;
 #[cfg(test)]
+mod property_resource_regression_tests;
+#[cfg(test)]
+mod property_resource_tests;
+pub(crate) mod property_resources;
+#[cfg(test)]
+mod source_identity_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_case_tests;
+#[cfg(test)]
+mod text_decoration_tests;
+#[cfg(test)]
+mod text_paragraph_tests;
+#[cfg(test)]
+mod text_round_trip_tests;
 
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use figcraft_doc::Document;
@@ -37,8 +56,11 @@ const MAX_CANVAS: u64 = 256 * 1024 * 1024;
 const MAX_CHUNK: u64 = 512 * 1024 * 1024;
 /// Largest image member read.
 const MAX_IMAGE: u64 = 256 * 1024 * 1024;
-/// Most chunks read from `canvas.fig`.
-const MAX_CHUNKS: usize = 16;
+/// Image members share a total budget; many individually valid members must not fill memory.
+const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_IMAGES: usize = 4096;
+/// Chunks read from `canvas.fig`: the schema and the message.
+const USED_CHUNKS: usize = 2;
 
 /// Whether `bytes` look like a `.fig` file: a zip holding `canvas.fig`, or a bare canvas.
 pub fn is_fig(bytes: &[u8]) -> bool {
@@ -60,13 +82,58 @@ pub fn import(bytes: &[u8], name: &str) -> Result<(Document, Vec<String>), Forma
     let archive = Archive::open(bytes)?;
     let (schema, message) = decode_canvas(&archive.canvas)?;
     let root = schema.find("Message").ok_or_else(|| corrupt("the schema has no Message definition"))?;
-    let msg = schema.decode_message(root, &message).map_err(|e| corrupt(e.to_string()))?;
+    let msg = schema.decode_import_message(root, &message).map_err(|e| corrupt(e.to_string()))?;
     let file_name = archive.file_name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(name);
-    let (json, mut warnings) = map::to_rest(&msg, file_name);
-    let images = |r: &str| archive.image(r);
-    let (doc, more) = crate::rest::import(&json, &images)?;
+    let (json, mut warnings) = map::to_rest(&msg, file_name)?;
+    let embedded = embedded_images(&msg, &archive.image_limits_hit);
+    let images = |r: &str| archive.resolve_image(r, embedded.get(r).copied());
+    let (doc, more) = crate::rest::import_fig(&json, &images)?;
     warnings.extend(more.into_iter().filter_map(map::adapt_warning));
+    if archive.image_limits_hit.get() {
+        warnings
+            .push(format!("image import is limited to {MAX_IMAGES} image refs and {MAX_IMAGE_BYTES} total bytes; remaining images are placeholders"));
+    }
     Ok((doc, warnings))
+}
+
+/// Older canvases may store image bytes in `Message.blobs`, addressed by `Image.dataBlob`. Only
+/// a paint's `image` is drawn (thumbnails and other image lists aren't), so only those count.
+/// Keep borrowed slices here; the resolver applies its budgets before copying any image.
+fn embedded_images<'m>(msg: &'m kiwi::Kv<'_>, limits_hit: &Cell<bool>) -> BTreeMap<String, &'m [u8]> {
+    fn visit<'m>(v: &'m kiwi::Kv<'_>, blobs: &'m [kiwi::Kv<'_>], images: &mut BTreeMap<String, &'m [u8]>, limits_hit: &Cell<bool>) {
+        match v {
+            kiwi::Kv::Object(fields) => {
+                for (name, field) in fields {
+                    if *name == "image"
+                        && let Some(hash) = field.get("hash").and_then(kiwi::Kv::bytes).filter(|h| !h.is_empty() && h.len() <= 64)
+                        && let Some(kiwi::Kv::Uint(index)) = field.get("dataBlob")
+                        && let Some(bytes) =
+                            usize::try_from(*index).ok().and_then(|i| blobs.get(i)).and_then(|b| b.get("bytes")).and_then(kiwi::Kv::bytes)
+                    {
+                        let key: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+                        if images.len() < MAX_IMAGES || images.contains_key(&key) {
+                            images.entry(key).or_insert(bytes);
+                        } else {
+                            limits_hit.set(true);
+                        }
+                    }
+                    visit(field, blobs, images, limits_hit);
+                }
+            }
+            kiwi::Kv::Array(values) => {
+                for value in values {
+                    visit(value, blobs, images, limits_hit);
+                }
+            }
+            _ => {}
+        }
+    }
+    let blobs = msg.get("blobs").map(kiwi::Kv::list).unwrap_or_default();
+    let mut images = BTreeMap::new();
+    for node in msg.get("nodeChanges").map(kiwi::Kv::list).unwrap_or_default() {
+        visit(node, blobs, &mut images, limits_hit);
+    }
+    images
 }
 
 /// A font style under the name the format uses: the standard weight names as words ("SemiBold"
@@ -100,12 +167,30 @@ struct Archive<'b> {
     file_name: Option<String>,
     /// `images/<hash>` members (or nothing for a bare canvas).
     zip: Option<zip::ZipArchive<std::io::Cursor<&'b [u8]>>>,
+    image_bytes: Cell<u64>,
+    image_count: Cell<usize>,
+    /// Image hashes looked up so far: whether each resolved.
+    image_refs: RefCell<BTreeMap<String, bool>>,
+    image_limits_hit: Cell<bool>,
 }
 
 impl<'b> Archive<'b> {
     fn open(bytes: &'b [u8]) -> Result<Self, FormatError> {
+        // Only the canvas is capped as a whole; image members have their own budgets, so a large
+        // archive with a small canvas still opens.
         if bytes.starts_with(b"fig-") {
-            return Ok(Archive { canvas: bytes.to_vec(), file_name: None, zip: None });
+            if bytes.len() as u64 > MAX_CANVAS {
+                return Err(corrupt("canvas.fig is too large"));
+            }
+            return Ok(Archive {
+                canvas: bytes.to_vec(),
+                file_name: None,
+                zip: None,
+                image_bytes: Cell::new(0),
+                image_count: Cell::new(0),
+                image_refs: RefCell::new(BTreeMap::new()),
+                image_limits_hit: Cell::new(false),
+            });
         }
         let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| corrupt(e.to_string()))?;
         let canvas = crate::read_member(&mut z, "canvas.fig", MAX_CANVAS)?;
@@ -113,17 +198,74 @@ impl<'b> Archive<'b> {
             .ok()
             .and_then(|m| serde_json::from_slice::<serde_json::Value>(&m).ok())
             .and_then(|m| m.get("file_name").and_then(serde_json::Value::as_str).map(str::to_string));
-        Ok(Archive { canvas, file_name, zip: Some(z) })
+        Ok(Archive {
+            canvas,
+            file_name,
+            zip: Some(z),
+            image_bytes: Cell::new(0),
+            image_count: Cell::new(0),
+            image_refs: RefCell::new(BTreeMap::new()),
+            image_limits_hit: Cell::new(false),
+        })
     }
 
     /// Bytes of image `hash` (lowercase hex) from `images/`.
+    #[cfg(test)]
     fn image(&self, hash: &str) -> Option<Vec<u8>> {
+        self.resolve_image(hash, None)
+    }
+
+    /// Archive members take precedence; a missing or damaged member can use an embedded blob.
+    fn resolve_image(&self, hash: &str, embedded: Option<&[u8]>) -> Option<Vec<u8>> {
         if hash.is_empty() || hash.len() > 128 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
+        let known = self.image_refs.try_borrow().ok()?.get(hash).copied();
+        // An image that failed once fails again: don't read it twice.
+        if known == Some(false) {
+            return None;
+        }
+        let seen = known == Some(true);
+        let name = format!("images/{hash}");
         // A clone shares the parsed directory and the bytes; the resolver only has shared access.
-        let mut z = self.zip.clone()?;
-        crate::read_member(&mut z, &format!("images/{hash}"), MAX_IMAGE).ok()
+        let mut z = self.zip.clone();
+        let member_size = z.as_mut().and_then(|z| z.by_name(&name).ok().map(|member| member.size()));
+        if member_size.is_none() && embedded.is_none() {
+            return None;
+        }
+        if !seen {
+            if self.image_count.get() >= MAX_IMAGES {
+                self.image_limits_hit.set(true);
+                return None;
+            }
+            // Charge the attempt, so reads that fail use up the count too.
+            self.image_count.set(self.image_count.get() + 1);
+        }
+        let limit = if seen { MAX_IMAGE } else { MAX_IMAGE_BYTES.saturating_sub(self.image_bytes.get()).min(MAX_IMAGE) };
+        let mut over = false;
+        let from_member = match member_size {
+            Some(size) if size > limit => {
+                over = true;
+                None
+            }
+            Some(_) => z.as_mut().and_then(|z| crate::read_member(z, &name, limit).ok()),
+            None => None,
+        };
+        let bytes = from_member.or_else(|| match embedded {
+            Some(b) if b.len() as u64 > limit => {
+                over = true;
+                None
+            }
+            b => b.map(<[u8]>::to_vec),
+        });
+        self.image_refs.try_borrow_mut().ok()?.insert(hash.to_owned(), bytes.is_some());
+        match &bytes {
+            // Multiple paints can share an image; charge its bytes only once.
+            Some(b) if !seen => self.image_bytes.set(self.image_bytes.get() + b.len() as u64),
+            None if over => self.image_limits_hit.set(true),
+            _ => {}
+        }
+        bytes
     }
 }
 
@@ -138,14 +280,15 @@ fn decode_canvas(canvas: &[u8]) -> Result<(Schema, Vec<u8>), FormatError> {
     Ok((schema, inflate(message)?))
 }
 
-/// The length-prefixed chunks after the 12-byte header.
+/// The length-prefixed chunks after the 12-byte header that the import uses; later chunks and
+/// trailing padding aren't read.
 fn chunks(canvas: &[u8]) -> Result<Vec<&[u8]>, FormatError> {
     if canvas.len() < 12 || !canvas.starts_with(b"fig-") {
         return Err(corrupt("canvas.fig has no header"));
     }
     let mut out = Vec::new();
     let mut pos = 12usize;
-    while pos < canvas.len() && out.len() < MAX_CHUNKS {
+    while pos < canvas.len() && out.len() < USED_CHUNKS {
         let len = canvas.get(pos..pos + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes).ok_or_else(|| corrupt("truncated chunk"))?;
         let start = pos + 4;
         let end = start.checked_add(len as usize).filter(|e| *e <= canvas.len()).ok_or_else(|| corrupt("truncated chunk"))?;
@@ -158,9 +301,7 @@ fn chunks(canvas: &[u8]) -> Result<Vec<&[u8]>, FormatError> {
 /// Decompress a chunk: zstd (by its magic number), else raw deflate, else zlib.
 fn inflate(data: &[u8]) -> Result<Vec<u8>, FormatError> {
     fn capped(r: impl Read) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        r.take(MAX_CHUNK + 1).read_to_end(&mut out).ok()?;
-        (out.len() as u64 <= MAX_CHUNK).then_some(out)
+        crate::read_capped(r, MAX_CHUNK, 0).ok().flatten()
     }
     if data.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
         let mut src = data;

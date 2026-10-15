@@ -106,6 +106,10 @@ fn type_style(cx: &mut Ctx, s: &Value, base: &TextStyle) -> TextStyle {
     if let Some(ls) = num(s, "letterSpacing") {
         t.letter_spacing = if ls == 0.0 { LetterSpacing::default() } else { LetterSpacing::Pixels(ls.clamp(-1e4, 1e4)) };
     }
+    // Private, from the .fig mapper: the spacing was a share of the font size.
+    if let Some(p) = num(s, "_letterSpacingPercent") {
+        t.letter_spacing = LetterSpacing::Percent(p.clamp(-1e4, 1e4));
+    }
     match text(s, "textCase") {
         Some("ORIGINAL") => t.case = TextCase::Original,
         Some("UPPER") => t.case = TextCase::Upper,
@@ -127,6 +131,8 @@ fn type_style(cx: &mut Ctx, s: &Value, base: &TextStyle) -> TextStyle {
     if let Some(h) = s.get("hyperlink") {
         match (text(h, "type"), text(h, "url")) {
             (Some("URL") | None, Some(url)) if !url.is_empty() => t.link = Some(super::props::clip_str(url).to_string()),
+            // An explicit null clears the base's link (an override entry unlinking some chars).
+            _ if h.is_null() => t.link = None,
             _ => {}
         }
     }

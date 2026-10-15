@@ -4,7 +4,7 @@
 //! when `FIGCRAFT_FIG_SAMPLES` names a folder of `.fig` files.
 
 use base64::Engine as _;
-use figcraft_doc::{Document, NodeKind};
+use figcraft_doc::{Document, LayoutMode, NodeKind};
 use serde_json::{Value, json};
 
 use crate::{EngineError, Session};
@@ -21,7 +21,42 @@ fn temp(name: &str) -> std::path::PathBuf {
 
 /// The layers depth-first: kind, name, position, size, text and fill count, and whether an
 /// instance's layers are linked to its main's.
-fn outline(doc: &Document) -> Vec<String> {
+#[derive(Clone)]
+struct OutlineLayer {
+    kind: &'static str,
+    name: String,
+    text: String,
+    fills: usize,
+    linked: bool,
+    layout_mode: Option<LayoutMode>,
+    geometry: [f64; 4],
+    layout_numbers: Option<[f64; 5]>,
+    image_paints: Vec<ImagePaintProof>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ImageProof {
+    digest: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ImagePaintProof {
+    stroke: bool,
+    index: usize,
+    image: Option<ImageProof>,
+}
+
+fn outline(doc: &Document) -> Vec<OutlineLayer> {
+    // Content evidence is computed once per image, independent of its imported key.
+    let images: std::collections::BTreeMap<_, _> = doc
+        .images
+        .iter()
+        .map(|(key, image)| {
+            (key.as_str(), ImageProof { digest: figcraft_format::image_hash(&image.bytes), width: image.width, height: image.height })
+        })
+        .collect();
     doc.pages
         .iter()
         .flat_map(|p| doc.subtree(*p))
@@ -30,20 +65,93 @@ fn outline(doc: &Document) -> Vec<String> {
             let t = n.transform.translation();
             let text = n.kind.text().map(|t| t.characters.clone()).unwrap_or_default();
             let inside = doc.ancestors(n.id).iter().any(|a| matches!(doc.node(*a).map(|x| &x.kind), Some(NodeKind::Instance { .. })));
-            format!(
-                "{} {:?} ({:.1}, {:.1}) {:.1}×{:.1} {text:?} fills {} linked {} layout {:?}",
-                n.kind.type_name(),
-                n.name,
-                t.x,
-                t.y,
-                n.width,
-                n.height,
-                n.fills.len(),
-                !inside || n.source.is_some(),
-                n.layout.as_ref().map(|l| (l.mode, l.gap, l.padding))
-            )
+            let image_paints = [(false, &n.fills), (true, &n.strokes)]
+                .into_iter()
+                .flat_map(|(stroke, paints)| {
+                    let images = &images;
+                    paints.iter().enumerate().filter_map(move |(index, paint)| {
+                        let figcraft_color::PaintKind::Image(image) = &paint.kind else { return None };
+                        Some(ImagePaintProof { stroke, index, image: images.get(image.image.as_str()).cloned() })
+                    })
+                })
+                .collect();
+            OutlineLayer {
+                kind: n.kind.type_name(),
+                name: n.name.clone(),
+                text,
+                fills: n.fills.len(),
+                linked: !inside || n.source.is_some(),
+                layout_mode: n.layout.as_ref().map(|l| l.mode),
+                geometry: [t.x, t.y, n.width, n.height],
+                layout_numbers: n.layout.as_ref().map(|l| [l.gap, l.padding[0], l.padding[1], l.padding[2], l.padding[3]]),
+                image_paints,
+            }
         })
         .collect()
+}
+
+fn same_float32(a: f64, b: f64) -> bool {
+    a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-6 + 2.0 * f64::from(f32::EPSILON) * a.abs().max(b.abs()).max(1.0)
+}
+
+fn compare_outline(before: &[OutlineLayer], after: &[OutlineLayer]) -> Result<(), String> {
+    if before.len() != after.len() {
+        return Err(format!("layer count: expected {}, got {}", before.len(), after.len()));
+    }
+    for (index, (before, after)) in before.iter().zip(after).enumerate() {
+        for (field, same) in [
+            ("type", before.kind == after.kind),
+            ("name/order", before.name == after.name),
+            ("text", before.text == after.text),
+            ("fill count", before.fills == after.fills),
+            ("linked", before.linked == after.linked),
+            ("layout mode", before.layout_mode == after.layout_mode),
+        ] {
+            if !same {
+                return Err(format!("layer {index}: {field} changed"));
+            }
+        }
+        for (field, (a, b)) in ["x", "y", "width", "height"].into_iter().zip(before.geometry.into_iter().zip(after.geometry)) {
+            if !same_float32(a, b) {
+                return Err(format!("layer {index}: {field}, expected {a:.9e}, got {b:.9e}"));
+            }
+        }
+        match (before.layout_numbers, after.layout_numbers) {
+            (Some(a), Some(b)) => {
+                for (field, (a, b)) in ["gap", "padding.top", "padding.right", "padding.bottom", "padding.left"].into_iter().zip(a.into_iter().zip(b))
+                {
+                    if !same_float32(a, b) {
+                        return Err(format!("layer {index}: {field}, expected {a:.9e}, got {b:.9e}"));
+                    }
+                }
+            }
+            (None, None) => {}
+            _ => return Err(format!("layer {index}: layout data presence changed")),
+        }
+        if before.image_paints.len() != after.image_paints.len() {
+            return Err(format!("layer {index}: image paint count, expected {}, got {}", before.image_paints.len(), after.image_paints.len()));
+        }
+        for (before, after) in before.image_paints.iter().zip(&after.image_paints) {
+            let list = if before.stroke { "strokes" } else { "fills" };
+            if before.stroke != after.stroke || before.index != after.index {
+                return Err(format!("layer {index}: {list}[{}] image paint target changed", before.index));
+            }
+            if before.image.is_none() || after.image.is_none() {
+                return Err(format!("layer {index}: {list}[{}] image paint has no image bytes", before.index));
+            }
+            if before.image != after.image {
+                return Err(format!("layer {index}: {list}[{}] image bytes or dimensions changed", before.index));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn assert_outline_matches(before: &[OutlineLayer], after: &[OutlineLayer], what: &str) {
+    if let Err(problem) = compare_outline(before, after) {
+        // Report only the first field, never entire outlines, layer text or image byte arrays.
+        panic!("{what}: {problem}");
+    }
 }
 
 /// A small file: a frame with auto layout holding text and a rectangle, a component with a text
@@ -75,7 +183,7 @@ fn exported_fig_files_open_with_the_same_layers() {
     let r = s.execute("file.open", &json!({"path": path.to_string_lossy()})).unwrap();
     assert!(r["warnings"].is_array());
     let doc = s.doc().unwrap();
-    assert_eq!(outline(doc), before);
+    assert_outline_matches(&before, &outline(doc), "exported file");
     let inst = doc.nodes().find(|n| matches!(n.kind, NodeKind::Instance { .. })).unwrap();
     assert!(inst.children.iter().all(|c| doc.node(*c).is_some_and(|c| c.source.is_some())));
     assert_eq!(doc.nodes().filter(|n| !n.interactions.is_empty()).count(), 1);
@@ -90,7 +198,7 @@ fn fig_export_without_a_path_returns_the_file() {
     let bytes = base64::engine::general_purpose::STANDARD.decode(r["data"].as_str().unwrap()).unwrap();
     assert!(figcraft_format::fig::is_fig(&bytes));
     let (doc, _) = crate::cmd::file::load_bytes(&bytes, "x.fig").unwrap();
-    assert_eq!(outline(&doc), outline(s.doc().unwrap()));
+    assert_outline_matches(&outline(s.doc().unwrap()), &outline(&doc), "base64 export");
     // A path ending in .fig picks the format.
     let path = temp("by-extension.fig");
     let r = s.execute("file.export", &json!({"path": path.to_string_lossy()})).unwrap();
@@ -133,9 +241,12 @@ fn local_samples_export_and_open_again() {
         s.execute("file.open", &json!({"path": p.to_string_lossy()})).unwrap();
         let before = outline(s.doc().unwrap());
         let out = temp(&format!("again-{}", p.file_name().unwrap().to_string_lossy()));
-        s.execute("file.export", &json!({"format": "fig", "path": out.to_string_lossy()})).unwrap();
+        s.execute("file.export", &json!({"format": "fig", "path": out.to_string_lossy()})).unwrap_or_else(|error| panic!("{}: {error}", p.display()));
         s.execute("file.open", &json!({"path": out.to_string_lossy()})).unwrap();
-        assert_eq!(outline(s.doc().unwrap()), before, "{}", p.display());
+        assert_outline_matches(&before, &outline(s.doc().unwrap()), &p.display().to_string());
         let _ = std::fs::remove_file(&out);
     }
 }
+
+#[path = "fig_export_proof_tests.rs"]
+mod proof;

@@ -424,28 +424,202 @@ fn schema_text_takes_numbers_and_refuses_bad_ones() {
     }
 }
 
-/// Local only (`FIGCRAFT_FIG_SAMPLES`): every definition, field and enum value the export writes
-/// has the kind, type and number it has in each sample's own schema.
-#[test]
-fn local_samples_agree_with_the_written_schema() {
-    let ours = Schema::parse(export::SCHEMA).unwrap();
-    let type_name = |s: &Schema, f: &super::kiwi::Field| match f.ty {
-        Some(Type::Def(i)) => s.defs[i].name.clone(),
-        t => format!("{t:?}"),
+/// Coverage of the writer's schema against a legacy reference. Missing fields include enum
+/// values and the members of entirely missing definitions; none of them count as checked.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Coverage {
+    checked_definitions: usize,
+    checked_fields: usize,
+    missing_definitions: usize,
+    missing_fields: usize,
+}
+
+/// The stable envelope, tree, geometry primitives and editable text/instance payload. These
+/// members exist in the three checked legacy profiles. A synthetic writer only requires the
+/// core definitions/fields it actually contains.
+const LEGACY_CORE: &[(&str, &[&str])] = &[
+    ("GUID", &["sessionID", "localID"]),
+    ("Color", &["r", "g", "b", "a"]),
+    ("Vector", &["x", "y"]),
+    ("Matrix", &["m00", "m01", "m02", "m10", "m11", "m12"]),
+    ("ColorStop", &["color", "position"]),
+    ("ParentIndex", &["guid", "position"]),
+    ("FontName", &["family", "style", "postscript"]),
+    ("Number", &["value", "units"]),
+    ("ExportConstraint", &["type", "value"]),
+    ("Blob", &["bytes"]),
+    ("MessageType", &["NODE_CHANGES"]),
+    ("NodePhase", &["CREATED", "REMOVED"]),
+    ("NodeType", &["DOCUMENT", "CANVAS", "FRAME", "TEXT", "SYMBOL", "INSTANCE", "ROUNDED_RECTANGLE"]),
+    (
+        "NodeChange",
+        &[
+            "guid",
+            "phase",
+            "parentIndex",
+            "type",
+            "name",
+            "size",
+            "transform",
+            "fillPaints",
+            "strokePaints",
+            "textData",
+            "fontName",
+            "fontSize",
+            "symbolData",
+            "derivedSymbolData",
+        ],
+    ),
+    ("Message", &["type", "sessionID", "nodeChanges", "blobs"]),
+    ("TextData", &["characters"]),
+    ("SymbolData", &["symbolID", "symbolOverrides"]),
+];
+
+fn legacy_schema_version(canvas: &[u8]) -> Option<u32> {
+    if canvas.get(..8) != Some(&b"fig-kiwi"[..]) {
+        return None;
+    }
+    let bytes: [u8; 4] = canvas.get(8..12)?.try_into().ok()?;
+    let version = u32::from_le_bytes(bytes);
+    matches!(version, 4 | 70 | 89).then_some(version)
+}
+
+/// Compare every common definition/member; only the legacy gate may record missing members.
+/// Struct fields are ordinal in the decoder, so the complete ordered field list must agree.
+fn compare_schema_members(ours: &Schema, theirs: &Schema, allow_missing: bool) -> Result<Coverage, String> {
+    if ours.defs.is_empty() || theirs.defs.is_empty() {
+        return Err("empty schema cannot establish compatibility".into());
+    }
+    let type_name = |s: &Schema, f: &super::kiwi::Field| -> Result<String, String> {
+        match f.ty {
+            Some(Type::Def(i)) => s.defs.get(i).map(|d| format!("definition:{}", d.name)).ok_or_else(|| "invalid type definition index".into()),
+            t => Ok(format!("{t:?}")),
+        }
     };
-    for p in super::tests::samples() {
-        let bytes = std::fs::read(&p).unwrap();
-        let (theirs, _) = decode_canvas(&Archive::open(&bytes).unwrap().canvas).unwrap();
-        for d in &ours.defs {
-            let t = theirs.defs.iter().find(|x| x.name == d.name).unwrap_or_else(|| panic!("{}: no {}", p.display(), d.name));
-            assert_eq!(t.kind, d.kind, "{}", d.name);
-            if d.kind == Kind::Struct {
-                assert_eq!(t.fields.len(), d.fields.len(), "{}", d.name);
+    let mut coverage = Coverage::default();
+    for d in &ours.defs {
+        let Some(t) = theirs.defs.iter().find(|x| x.name == d.name) else {
+            if !allow_missing {
+                return Err(format!("no {}", d.name));
             }
-            for f in &d.fields {
-                let tf = t.fields.iter().find(|x| x.name == f.name).unwrap_or_else(|| panic!("{}: no {}.{}", p.display(), d.name, f.name));
-                assert_eq!((tf.value, tf.array, type_name(&theirs, tf)), (f.value, f.array, type_name(&ours, f)), "{}.{}", d.name, f.name);
+            coverage.missing_definitions += 1;
+            coverage.missing_fields += d.fields.len();
+            continue;
+        };
+        if t.kind != d.kind {
+            return Err(format!("{}: definition kind changed", d.name));
+        }
+        if d.kind == Kind::Struct {
+            if t.fields.len() != d.fields.len() {
+                return Err(format!("{}: field count, expected {}, got {}", d.name, d.fields.len(), t.fields.len()));
+            }
+            if d.fields.iter().zip(&t.fields).any(|(f, tf)| f.name != tf.name) {
+                return Err(format!("{}: ordered struct fields changed", d.name));
+            }
+        }
+        coverage.checked_definitions += 1;
+        for f in &d.fields {
+            // Decoding messages/enums selects by number, so another name cannot own this ID
+            // even when the expected name is also present elsewhere in the reference.
+            if let Some(owner) = t.fields.iter().find(|x| x.value == f.value && x.name != f.name) {
+                return Err(format!("{}.{}: number {} belongs to {}", d.name, f.name, f.value, owner.name));
+            }
+            let Some(tf) = t.fields.iter().find(|x| x.name == f.name) else {
+                if !allow_missing {
+                    return Err(format!("no {}.{}", d.name, f.name));
+                }
+                coverage.missing_fields += 1;
+                continue;
+            };
+            if tf.value != f.value {
+                return Err(format!("{}.{}: number, expected {}, got {}", d.name, f.name, f.value, tf.value));
+            }
+            if tf.array != f.array {
+                return Err(format!("{}.{}: array flag changed", d.name, f.name));
+            }
+            if type_name(theirs, tf)? != type_name(ours, f)? {
+                return Err(format!("{}.{}: type changed", d.name, f.name));
+            }
+            coverage.checked_fields += 1;
+        }
+    }
+    Ok(coverage)
+}
+
+/// The full writer-schema gate: no missing definitions, fields or enum values are exempt.
+fn compare_written_schema(ours: &Schema, theirs: &Schema) -> Result<(), String> {
+    compare_schema_members(ours, theirs, false).map(|_| ())
+}
+
+/// Explicit legacy core/shared gate, never a claim of full schema or Figma compatibility.
+fn compare_legacy_core_shared_schema(ours: &Schema, theirs: &Schema, canvas: &[u8]) -> Result<Coverage, String> {
+    if legacy_schema_version(canvas).is_none() {
+        return Err("legacy gate requires fig-kiwi version 4, 70 or 89".into());
+    }
+    for &(name, fields) in LEGACY_CORE {
+        let Some(d) = ours.defs.iter().find(|d| d.name == name) else { continue };
+        let t = theirs.defs.iter().find(|d| d.name == name).ok_or_else(|| format!("legacy core: no {name}"))?;
+        for &field in fields {
+            if d.fields.iter().any(|f| f.name == field) && !t.fields.iter().any(|f| f.name == field) {
+                return Err(format!("legacy core: no {name}.{field}"));
             }
         }
     }
+    let coverage = compare_schema_members(ours, theirs, true)?;
+    if coverage.checked_definitions == 0 {
+        return Err("legacy gate found no shared definitions".into());
+    }
+    Ok(coverage)
 }
+
+#[derive(Debug, PartialEq, Eq)]
+enum SchemaCheck {
+    Full,
+    Legacy { version: u32, coverage: Coverage },
+}
+
+fn compare_sample_schema(ours: &Schema, theirs: &Schema, canvas: &[u8]) -> Result<SchemaCheck, String> {
+    if let Some(version) = legacy_schema_version(canvas) {
+        let coverage = compare_legacy_core_shared_schema(ours, theirs, canvas)?;
+        Ok(SchemaCheck::Legacy { version, coverage })
+    } else {
+        compare_written_schema(ours, theirs)?;
+        Ok(SchemaCheck::Full)
+    }
+}
+
+/// Local only (`FIGCRAFT_FIG_SAMPLES`): unknown/modern profiles check the complete writer schema.
+/// The three explicitly known legacy headers check the required core and every shared member;
+/// absent modern schema features are counted as unverified, not accepted as a full-schema proof.
+#[test]
+fn local_samples_agree_with_the_written_schema() {
+    let ours = Schema::parse(export::SCHEMA).unwrap();
+    for p in super::tests::samples() {
+        let bytes = std::fs::read(&p).unwrap();
+        let archive = Archive::open(&bytes).unwrap();
+        let (theirs, _) = decode_canvas(&archive.canvas).unwrap();
+        match compare_sample_schema(&ours, &theirs, &archive.canvas).unwrap_or_else(|problem| panic!("{}: {problem}", p.display())) {
+            SchemaCheck::Full => eprintln!("{}: complete writer schema checked against the reference; Figma acceptance untested", p.display()),
+            SchemaCheck::Legacy { version, coverage } => eprintln!(
+                "{}: fig-kiwi v{version} legacy core/shared-only: checked {} definitions / {} fields and enum values; \
+                 UNVERIFIED modern coverage gaps: {} definitions / {} fields and enum values (includes missing definitions' members); \
+                 absent features remain unreferenced by this check; no full-schema or Figma compatibility result",
+                p.display(),
+                coverage.checked_definitions,
+                coverage.checked_fields,
+                coverage.missing_definitions,
+                coverage.missing_fields,
+            ),
+        }
+    }
+}
+
+fn canvas_header(version: u32) -> [u8; 12] {
+    let mut header = [0; 12];
+    header[..8].copy_from_slice(b"fig-kiwi");
+    header[8..].copy_from_slice(&version.to_le_bytes());
+    header
+}
+
+#[path = "schema_coverage_tests.rs"]
+mod schema_coverage_tests;

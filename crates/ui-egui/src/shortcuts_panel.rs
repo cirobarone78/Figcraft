@@ -1,4 +1,4 @@
-//! Help ▸ Keyboard shortcuts: a panel along the bottom of the window with a tab per group of the
+//! Help ▸ Keyboard shortcuts: a dialog centred on the window with a tab per group of the
 //! keymap (Essential, Tools, View…), each command's keys as keycaps for this platform, and a search
 //! across every group.
 
@@ -101,9 +101,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     let t = Tokens::get(ctx);
     let platform = crate::shortcuts::platform();
     let width = (ctx.content_rect().width() - 48.0).clamp(480.0, 1040.0);
-    let mut open = true;
-    crate::dialogs::window(tr("Keyboard shortcuts"), ctx).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -16.0)).open(&mut open).show(ctx, |ui| {
-        ui.set_width(width);
+    let ((), close) = crate::dialogs::card(egui::Id::new("Keyboard shortcuts"), tr("Keyboard shortcuts"), width, ctx, |ui| {
         ui.horizontal(|ui| {
             crate::dialogs::tab_strip(ui, &t, &Group::ALL, |g| tr(g.label()), &mut app.ui.shortcuts_tab);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -140,7 +138,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
             });
         });
     });
-    if !open {
+    if close {
         app.ui.shortcuts_panel = false;
     }
 }

@@ -551,6 +551,13 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             if let Some(v) = p.get("exportPreview").and_then(Value::as_bool) {
                 app.ui.export_thumb = v;
             }
+            // Import from Figma in its importing phase with a synthetic job, for screenshots
+            // without a network request: {stage: file|variables|images|retry, completed, total}.
+            if let Some(v) = p.get("figmaImportPreview").filter(|v| v.is_object()) {
+                let count = |key: &str| v.get(key).and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
+                let stage = v.get("stage").and_then(Value::as_str).unwrap_or("file");
+                crate::figma_import::preview(app, stage, count("completed"), count("total"));
+            }
             // Dev Mode's compare view: a ready-for-dev frame or section opens it, null closes it;
             // `devCompareMode` is sideBySide or overlay, `devCompareSplit` the overlay slider (0–1).
             if let Some(v) = p.get("devCompare") {

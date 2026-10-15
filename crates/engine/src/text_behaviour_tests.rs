@@ -181,14 +181,19 @@ fn paragraph_indent_only_moves_left_aligned_text() {
     let t = text(&mut s, "Indented paragraph", json!({"fontSize": 20, "paragraphIndent": 30}));
     let first_x = |s: &Session| {
         let (l, _) = figcraft_text::layout_node(s.doc().unwrap().node(t).unwrap()).unwrap();
-        (l.glyphs.first().map_or(0.0, |g| g.x), l.width)
+        l.glyphs.first().map(|g| (g.x, l.width))
     };
-    let (x, w) = first_x(&s);
-    if w <= 0.0 {
+    // Without the layer's font (CI has no fonts) nothing lays out; with it, glyphs must exist.
+    let Some((x, w)) = first_x(&s) else {
+        let family = match &s.doc().unwrap().node(t).unwrap().kind {
+            NodeKind::Text(td) => td.style.font_family.clone(),
+            _ => panic!("a text layer"),
+        };
+        assert!(figcraft_text::face_with_char('I', &[family.as_str()]).is_none(), "{family} is available but laid out no glyphs");
         return;
-    }
+    };
     assert!((x - 30.0).abs() < 1e-6, "left: indented");
     s.execute("node.set", &json!({"id": t, "props": {"textAlign": "center"}})).unwrap();
-    let (x, w2) = first_x(&s);
+    let (x, w2) = first_x(&s).unwrap();
     assert!((w2 - (w - 30.0)).abs() < 1e-6 && x.abs() < 1e-6, "centered auto-width text: no indent, the box shrinks by it");
 }

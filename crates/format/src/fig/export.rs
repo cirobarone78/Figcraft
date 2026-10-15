@@ -14,8 +14,9 @@
 //! through our own importer are tested, and written files were opened in other software
 //! (`docs/file-format-parity.md` says what was checked); other apps may not open every file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use figcraft_doc::color::{BlendMode, Color, GradientKind, ImageScaleMode, Paint, PaintKind};
@@ -34,6 +35,10 @@ use serde_json::Value;
 
 use super::kiwi::{Kv, Schema, encode};
 use super::network;
+use super::property_resources::{
+    self as properties, Alias, Bindings, Catalog, DROPPED_DAMAGED, DROPPED_LIMIT, DROPPED_UNBOUND, Id as PropertyId, MainTag, NativePacket, Remap,
+    Role, WirePacket, WireResources,
+};
 use crate::FormatError;
 
 /// Most layers written, and deepest nesting followed (the import's limits).
@@ -43,13 +48,15 @@ const MAX_DEPTH: usize = 256;
 const MAX_CANVAS: u64 = super::MAX_CANVAS;
 const MAX_IMAGE: u64 = super::MAX_IMAGE;
 /// Largest whole file written.
-const MAX_FILE: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_FILE: u64 = super::MAX_CANVAS;
 /// Most characters of one text layer, and vertices + segments + loop entries of one vector
 /// network (what the import reads).
 const MAX_CHARS: usize = 1 << 20;
 const MAX_NETWORK: usize = 200_000;
 /// Largest magnitude written for a float (the format stores 32-bit floats).
 const MAX_FLOAT: f64 = 1e30;
+/// The fields an instance keeps as its own rather than overriding its main's.
+const INSTANCE_OWN: [&str; 7] = ["guid", "phase", "parentIndex", "type", "transform", "fillGeometry", "strokeGeometry"];
 /// The version number in the `canvas.fig` header.
 const VERSION: u32 = 101;
 /// Session ids of the GUIDs: layers, and grid tracks and component properties.
@@ -176,11 +183,19 @@ message Message MessageType type=1, uint sessionID=2, NodeChange[] nodeChanges=4
 /// Write `doc` as a `.fig` file, with `thumbnail` (a PNG) when given. Returns the bytes and the
 /// warnings about what was left out or approximated.
 pub fn export(doc: &Document, thumbnail: Option<&[u8]>) -> Result<(Vec<u8>, Vec<String>), FormatError> {
-    let mut x = Exporter::new(doc);
-    let message = x.message();
+    let mut x = Exporter::new(doc)?;
+    let message = x.message()?;
+    if x.unsupported_nested_structure {
+        return Err(FormatError::Io(".fig export: nested instance type changes with children are not supported".into()));
+    }
+    if x.unsupported_unlinked_instance {
+        return Err(FormatError::Io(".fig export: a nested instance has no unambiguous source layer".into()));
+    }
     let fail = |e: super::kiwi::KiwiError| FormatError::Io(format!(".fig export: {e}"));
     let schema = Schema::parse(SCHEMA).map_err(fail)?;
     let root = schema.find("Message").ok_or_else(|| FormatError::Io(".fig export: the schema has no Message".into()))?;
+    // The encoded/compressed size does not bound the reader's retained value cells.
+    schema.decoded_cost(root, &message).map_err(|_| too_large())?;
     let body = encode::message(&schema, root, &message).map_err(fail)?;
     let canvas = canvas(&encode::schema(&schema), &body)?;
     let background = doc.pages.first().and_then(|p| doc.node(*p)).and_then(|p| match &p.kind {
@@ -195,11 +210,127 @@ fn too_large() -> FormatError {
     FormatError::Io("the document is too large for a .fig file".into())
 }
 
+/// Decoder-projected value cells and UTF-8/blob bytes, using the reader's actual limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DecodeCost {
+    bytes: usize,
+    values: usize,
+}
+
+impl DecodeCost {
+    fn add(self, other: Self) -> Result<Self, FormatError> {
+        Ok(Self {
+            bytes: self.bytes.checked_add(other.bytes).ok_or_else(too_large)?,
+            values: self.values.checked_add(other.values).ok_or_else(too_large)?,
+        })
+    }
+    fn times(self, count: usize) -> Result<Self, FormatError> {
+        Ok(Self { bytes: self.bytes.checked_mul(count).ok_or_else(too_large)?, values: self.values.checked_mul(count).ok_or_else(too_large)? })
+    }
+    fn fields(count: usize) -> Result<Self, FormatError> {
+        Self { bytes: std::mem::size_of::<(&str, Kv<'static>)>(), values: 0 }.times(count)
+    }
+    fn array(count: usize) -> Result<Self, FormatError> {
+        Self { bytes: std::mem::size_of::<Kv<'static>>(), values: 1 }.times(count)
+    }
+    fn checked(self) -> Result<Self, FormatError> {
+        if self.bytes > super::kiwi::MAX_DECODE_BYTES || self.values > super::kiwi::MAX_VALUES {
+            return Err(too_large());
+        }
+        Ok(self)
+    }
+}
+
+fn text_style_decode_cost(st: &TextStyle) -> Result<DecodeCost, FormatError> {
+    // Six style fields, three FontName struct fields, and two fields for each Number struct.
+    let mut cost = DecodeCost::fields(13)?;
+    cost.values = 7; // FontName, two Number + units, TextCase, TextDecoration.
+    // style_name adds at most two word separators to recognized weight/italic names.
+    cost.bytes = cost
+        .bytes
+        .checked_add(st.font_family.len())
+        .and_then(|n| n.checked_add(st.font_style.len()))
+        .and_then(|n| n.checked_add(2))
+        .ok_or_else(too_large)?;
+    if let Some(url) = &st.link {
+        cost = cost.add(DecodeCost::fields(2)?)?.add(DecodeCost { bytes: url.len(), values: 1 })?;
+    }
+    Ok(cost)
+}
+
+fn text_paints_decode_cost(paints: &[Paint]) -> Result<DecodeCost, FormatError> {
+    let mut cost = DecodeCost::fields(1)?; // The fillPaints field, even for an empty list.
+    for p in paints {
+        let paint = match &p.kind {
+            PaintKind::Solid { .. } => DecodeCost::fields(5 + 4)?.add(DecodeCost { bytes: 0, values: 4 })?,
+            PaintKind::Gradient(g) => {
+                let stop = DecodeCost::fields(2 + 4)?.add(DecodeCost::array(1)?)?.add(DecodeCost { bytes: 0, values: 2 })?;
+                DecodeCost::fields(6 + 6)?.add(DecodeCost { bytes: 0, values: 4 })?.add(stop.times(g.stops.len())?)?
+            }
+            PaintKind::Image(image) => {
+                // Eight Paint fields + two Image message fields; SHA-256 hash is at most 32 bytes.
+                let mut paint = DecodeCost::fields(8 + 2)?.add(DecodeCost { bytes: 32, values: 6 })?;
+                if image.scale_mode == ImageScaleMode::Crop && image.crop.is_some() {
+                    paint = paint.add(DecodeCost::fields(1 + 6)?)?.add(DecodeCost { bytes: 0, values: 1 })?;
+                }
+                paint
+            }
+            PaintKind::Pattern(_) => continue, // The existing paint writer omits patterns.
+        };
+        cost = cost.add(DecodeCost::array(1)?)?.add(paint)?;
+    }
+    Ok(cost)
+}
+
+fn text_decode_cost(td: &TextData, fills: &[Paint], spans: &[(usize, usize, &TextStyle)], previous: DecodeCost) -> Result<DecodeCost, FormatError> {
+    // Base style, fifteen box/settings fields, the textData field and its characters/lines fields.
+    let mut cost = previous.add(text_style_decode_cost(&td.style)?)?.add(DecodeCost::fields(15 + 1 + 2)?)?;
+    cost = cost.add(DecodeCost { bytes: 0, values: 6 })?; // Node/TextData + four setting enums.
+    if td.auto_resize == TextAutoResize::Truncate {
+        cost = cost.add(DecodeCost::fields(1)?)?.add(DecodeCost { bytes: 0, values: 1 })?;
+    }
+    if td.max_lines > 0 {
+        cost = cost.add(DecodeCost::fields(1)?)?;
+    }
+    let mut units = 0usize;
+    let mut bytes = 0usize;
+    for ch in td.characters.chars().take(MAX_CHARS).filter(|ch| *ch != '\0') {
+        units = units.checked_add(ch.len_utf16()).ok_or_else(too_large)?;
+        bytes = bytes.checked_add(ch.len_utf8()).ok_or_else(too_large)?;
+    }
+    cost = cost.add(DecodeCost { bytes, values: 0 })?;
+    let line = DecodeCost::fields(6)?.add(DecodeCost::array(1)?)?.add(DecodeCost { bytes: 0, values: 3 })?;
+    cost = cost.add(line.times(td.paragraph_count())?)?.checked()?;
+    let mut has_rows = false;
+    for (start, _, st) in spans {
+        if *start >= MAX_CHARS || std::ptr::eq(*st, &td.style) {
+            continue;
+        }
+        if !has_rows {
+            cost = cost.add(DecodeCost::fields(2)?)?.add(DecodeCost::array(units)?)?.checked()?;
+            has_rows = true;
+        }
+        // Each original row has styleID, its NodeChange definition and one array value cell.
+        let mut row = text_style_decode_cost(st)?.add(DecodeCost::fields(1)?)?.add(DecodeCost::array(1)?)?.add(DecodeCost { bytes: 0, values: 1 })?;
+        if let Some(paints) = st.fills.as_deref().or(td.style.fills.as_ref().map(|_| fills)) {
+            row = row.add(text_paints_decode_cost(paints)?)?;
+        }
+        if unlinks(st, &td.style) {
+            row = row.add(DecodeCost::fields(2)?)?.add(DecodeCost { bytes: 0, values: 1 })?;
+        }
+        cost = cost.add(row)?.checked()?;
+    }
+    Ok(cost)
+}
+
 /// `canvas.fig`: the magic, the version and the two deflated chunks, each after its length.
 fn canvas(schema: &[u8], message: &[u8]) -> Result<Vec<u8>, FormatError> {
     let mut out = b"fig-kiwi".to_vec();
     out.extend_from_slice(&VERSION.to_le_bytes());
     for chunk in [schema, message] {
+        if chunk.len() as u64 > super::MAX_CHUNK {
+            return Err(too_large());
+        }
         let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
         z.write_all(chunk).map_err(crate::io_err)?;
         let c = z.finish().map_err(crate::io_err)?;
@@ -221,6 +352,60 @@ fn archive(
     images: &[(String, Arc<Vec<u8>>)],
     thumbnail: Option<&[u8]>,
 ) -> Result<Vec<u8>, FormatError> {
+    archive_with_limit(name, background, canvas, images, thumbnail, MAX_FILE)
+}
+
+fn check_archive_budget(
+    canvas_bytes: u64,
+    image_sizes: impl IntoIterator<Item = u64>,
+    extra_bytes: u64,
+    file_limit: u64,
+    image_limit: usize,
+    image_bytes_limit: u64,
+) -> Result<(), FormatError> {
+    let mut total = canvas_bytes.checked_add(extra_bytes).ok_or_else(too_large)?;
+    if total > file_limit {
+        return Err(too_large());
+    }
+    let mut image_bytes = 0u64;
+    for (index, bytes) in image_sizes.into_iter().enumerate() {
+        if index >= image_limit {
+            return Err(too_large());
+        }
+        image_bytes = image_bytes.checked_add(bytes).ok_or_else(too_large)?;
+        total = total.checked_add(bytes).ok_or_else(too_large)?;
+        if image_bytes > image_bytes_limit || total > file_limit {
+            return Err(too_large());
+        }
+    }
+    Ok(())
+}
+
+fn archive_with_limit(
+    name: &str,
+    background: Color,
+    canvas: &[u8],
+    images: &[(String, Arc<Vec<u8>>)],
+    thumbnail: Option<&[u8]>,
+    file_limit: u64,
+) -> Result<Vec<u8>, FormatError> {
+    let mut client = serde_json::json!({"background_color": {"r": background.r, "g": background.g, "b": background.b, "a": background.a}});
+    // A PNG says its size right after its signature and header chunk name.
+    let be = |at: usize| thumbnail.and_then(|t| t.get(at..at + 4)).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
+    if let (Some(w), Some(h)) = (be(16), be(20)) {
+        client["thumbnail_size"] = serde_json::json!({"width": w, "height": h});
+    }
+    let meta = serde_json::to_vec(&serde_json::json!({"client_meta": client, "file_name": name})).map_err(crate::io_err)?;
+    let extra = (meta.len() as u64).checked_add(thumbnail.map_or(0, |t| t.len() as u64)).ok_or_else(too_large)?;
+    // Refuse files the importer cannot read before building another copy of their image bytes.
+    check_archive_budget(
+        canvas.len() as u64,
+        images.iter().map(|(_, b)| b.len() as u64),
+        extra,
+        file_limit,
+        super::MAX_IMAGES,
+        super::MAX_IMAGE_BYTES,
+    )?;
     let mut buf = std::io::Cursor::new(Vec::new());
     {
         let mut z = zip::ZipWriter::new(&mut buf);
@@ -229,25 +414,18 @@ fn archive(
         if let Some(t) = thumbnail {
             crate::put(&mut z, "thumbnail.png", stored, t)?;
         }
-        let mut client = serde_json::json!({"background_color": {"r": background.r, "g": background.g, "b": background.b, "a": background.a}});
-        // A PNG says its size right after its signature and header chunk name.
-        let be = |at: usize| thumbnail.and_then(|t| t.get(at..at + 4)).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
-        if let (Some(w), Some(h)) = (be(16), be(20)) {
-            client["thumbnail_size"] = serde_json::json!({"width": w, "height": h});
-        }
-        let meta = serde_json::to_vec(&serde_json::json!({"client_meta": client, "file_name": name})).map_err(crate::io_err)?;
         crate::put(&mut z, "meta.json", crate::json_options(), &meta)?;
-        let mut total = canvas.len() as u64;
         for (hash, bytes) in images {
-            total += bytes.len() as u64;
-            if total > MAX_FILE {
-                return Err(too_large());
-            }
             crate::put(&mut z, &format!("images/{hash}"), stored, bytes)?;
         }
         z.finish().map_err(crate::io_err)?;
     }
-    Ok(buf.into_inner())
+    let bytes = buf.into_inner();
+    // ZIP headers and the directory also count towards the whole-file read limit.
+    if bytes.len() as u64 > file_limit {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 type Fields = Vec<(&'static str, Kv<'static>)>;
@@ -394,6 +572,399 @@ struct Overlay {
     background: Option<Color>,
 }
 
+/// Private Boolean property records never block an export: a damaged, orphaned or oversized
+/// record is left out (only its provenance is lost) and reported once per kind with a count.
+const DROPPED_ORPHANED: &str = "private Boolean property record(s) whose hidden definition catalog is missing were left out";
+const DROPPED_COLLISION: &str = "hidden Boolean definition catalog(s) whose names collide with live component properties were left out";
+
+#[derive(Default)]
+struct PropertyNode {
+    catalog: Option<String>,
+    main: Option<MainTag>,
+    bindings: Option<Bindings>,
+    values: BTreeMap<String, PropertyId>,
+}
+
+impl PropertyNode {
+    fn is_empty(&self) -> bool {
+        self.catalog.is_none() && self.main.is_none() && self.bindings.is_none()
+    }
+}
+
+/// A catalog is stored once per input scope. Expanded nodes carry only their small bindings.
+#[derive(Default)]
+struct PropertyResources {
+    catalogs: BTreeMap<String, Catalog>,
+    names: BTreeMap<(String, PropertyId), String>,
+    native: BTreeMap<NodeId, PropertyNode>,
+    active: BTreeMap<(NodeId, Role, String), (String, PropertyId)>,
+    /// Unregistered Boolean fields whose provenance is gone: written neither as a resource
+    /// alias nor through a same-named live definition of another component.
+    unbound: BTreeSet<(NodeId, Role, String)>,
+    owners: BTreeMap<(String, PropertyId), u32>,
+    definitions: BTreeMap<(String, PropertyId), u32>,
+    packets: BTreeMap<NodeId, String>,
+    dropped: BTreeMap<&'static str, usize>,
+}
+
+/// `raw` parsed by `read`, if it is valid and written exactly as `write` writes it.
+fn canonical<T>(raw: &str, read: impl Fn(&str) -> Result<T, FormatError>, write: impl Fn(&T) -> Result<String, FormatError>) -> Option<T> {
+    read(raw).ok().filter(|value| write(value).is_ok_and(|text| text == raw))
+}
+
+impl PropertyResources {
+    fn new(doc: &Document) -> Self {
+        let mut out = Self::default();
+        let (mut bytes, mut owners, mut definitions, mut bindings) = (0usize, 0usize, 0usize, 0usize);
+        for n in doc.nodes() {
+            let mut meta = PropertyNode::default();
+            for key in [properties::CATALOG_KEY, properties::MAIN_KEY, properties::BINDINGS_KEY] {
+                let Some(raw) = n.plugin_data.get(key) else { continue };
+                match bytes.checked_add(raw.len()).filter(|total| *total <= properties::MAX_TOTAL_BYTES) {
+                    Some(total) => bytes = total,
+                    None => {
+                        out.left_out(DROPPED_LIMIT, 1);
+                        continue;
+                    }
+                }
+                match key {
+                    properties::CATALOG_KEY => {
+                        let catalog = matches!(n.kind, NodeKind::Page { .. })
+                            .then(|| canonical(raw, properties::read_catalog, properties::write_catalog))
+                            .flatten();
+                        let Some(catalog) = catalog else {
+                            out.left_out(DROPPED_DAMAGED, 1);
+                            continue;
+                        };
+                        if let Some(previous) = out.catalogs.get(&catalog.scope) {
+                            if previous != &catalog {
+                                out.left_out(DROPPED_DAMAGED, 1);
+                                continue;
+                            }
+                        } else {
+                            let rows = catalog.owners.iter().map(|o| o.definitions.len()).sum::<usize>();
+                            let (Some(next_owners), Some(next_definitions)) =
+                                (owners.checked_add(catalog.owners.len()), definitions.checked_add(rows))
+                            else {
+                                out.left_out(DROPPED_LIMIT, 1);
+                                continue;
+                            };
+                            if next_owners > properties::MAX_OWNERS || next_definitions > properties::MAX_DEFINITIONS {
+                                out.left_out(DROPPED_LIMIT, 1);
+                                continue;
+                            }
+                            (owners, definitions) = (next_owners, next_definitions);
+                            for d in catalog.owners.iter().flat_map(|o| &o.definitions) {
+                                out.names.entry((catalog.scope.clone(), d.id)).or_insert_with(|| d.name.clone());
+                            }
+                            out.catalogs.insert(catalog.scope.clone(), catalog.clone());
+                        }
+                        meta.catalog = Some(catalog.scope);
+                    }
+                    properties::MAIN_KEY => {
+                        let main = matches!(n.kind, NodeKind::Component { .. })
+                            .then(|| canonical(raw, properties::read_main, properties::write_main))
+                            .flatten();
+                        match main {
+                            Some(main) => meta.main = Some(main),
+                            None => out.left_out(DROPPED_DAMAGED, 1),
+                        }
+                    }
+                    properties::BINDINGS_KEY => {
+                        let Some(packet) = canonical(raw, properties::read_bindings, properties::write_bindings) else {
+                            out.left_out(DROPPED_DAMAGED, 1);
+                            continue;
+                        };
+                        match bindings.checked_add(packet.values.len() + usize::from(packet.visible.is_some())) {
+                            Some(total) if total <= properties::MAX_BINDINGS => bindings = total,
+                            _ => {
+                                out.left_out(DROPPED_LIMIT, 1);
+                                continue;
+                            }
+                        }
+                        meta.values = packet.values.iter().map(|b| (b.key.clone(), b.definition)).collect();
+                        meta.bindings = Some(packet);
+                    }
+                    _ => {}
+                }
+            }
+            if !meta.is_empty() {
+                out.native.insert(n.id, meta);
+            }
+        }
+        // A main tag or bindings packet whose catalog is gone (its page was deleted, or the layer
+        // was pasted from another document) has nothing left to describe.
+        let mut orphaned = 0;
+        for meta in out.native.values_mut() {
+            if meta.main.as_ref().is_some_and(|tag| !out.catalogs.contains_key(&tag.scope)) {
+                meta.main = None;
+                orphaned += 1;
+            }
+            if meta.bindings.as_ref().is_some_and(|packet| {
+                !out.catalogs.contains_key(&packet.scope)
+                    || packet.values.iter().chain(packet.visible.iter()).any(|b| !out.names.contains_key(&(packet.scope.clone(), b.definition)))
+            }) {
+                meta.bindings = None;
+                meta.values.clear();
+                orphaned += 1;
+            }
+        }
+        out.native.retain(|_, meta| !meta.is_empty());
+        out.left_out(DROPPED_ORPHANED, orphaned);
+        for n in doc.nodes() {
+            if let NodeKind::Instance { component, props } = &n.kind {
+                for (key, value) in props {
+                    if value.is_boolean() && !Self::known(doc, *component, key) {
+                        // REST retains at most 256 instance properties. A resource alias beyond
+                        // that boundary would describe a value our own reader has discarded.
+                        if props.len() > 256 || !out.activate(doc, n, *component, Role::Value, key) {
+                            out.unbind(n.id, Role::Value, key);
+                        }
+                    }
+                }
+            }
+            if let Some(key) = n.prop_refs.get("visible") {
+                let main =
+                    if matches!(n.kind, NodeKind::Component { .. }) { Some(n.id) } else { n.parent.and_then(|parent| Self::owner(doc, parent)) };
+                match main {
+                    Some(main) if Self::known(doc, main, key) => {}
+                    Some(main) if out.activate(doc, n, main, Role::Visible, key) => {}
+                    _ => out.unbind(n.id, Role::Visible, key),
+                }
+            }
+        }
+        out
+    }
+
+    fn left_out(&mut self, kind: &'static str, count: usize) {
+        if count > 0 {
+            *self.dropped.entry(kind).or_default() += count;
+        }
+    }
+
+    fn unbind(&mut self, node: NodeId, role: Role, key: &str) {
+        self.active.remove(&(node, role, key.to_string()));
+        if self.unbound.insert((node, role, key.to_string())) {
+            self.left_out(DROPPED_UNBOUND, 1);
+        }
+    }
+
+    fn is_unbound(&self, node: NodeId, role: Role, key: &str) -> bool {
+        self.unbound.contains(&(node, role, key.to_string()))
+    }
+
+    /// Leave out every record of catalogs `scopes`, and the aliases that depend on them.
+    fn drop_scopes(&mut self, scopes: &BTreeSet<String>) {
+        if scopes.is_empty() {
+            return;
+        }
+        self.catalogs.retain(|scope, _| !scopes.contains(scope));
+        self.names.retain(|(scope, _), _| !scopes.contains(scope));
+        self.owners.retain(|(scope, _), _| !scopes.contains(scope));
+        self.definitions.retain(|(scope, _), _| !scopes.contains(scope));
+        let mut orphaned = 0;
+        for meta in self.native.values_mut() {
+            meta.catalog = meta.catalog.take().filter(|scope| !scopes.contains(scope));
+            if meta.main.as_ref().is_some_and(|tag| scopes.contains(&tag.scope)) {
+                meta.main = None;
+                orphaned += 1;
+            }
+            if meta.bindings.as_ref().is_some_and(|packet| scopes.contains(&packet.scope)) {
+                meta.bindings = None;
+                meta.values.clear();
+                orphaned += 1;
+            }
+        }
+        self.native.retain(|_, meta| !meta.is_empty());
+        self.left_out(DROPPED_ORPHANED, orphaned);
+        let lost: Vec<_> = self.active.iter().filter(|(_, (scope, _))| scopes.contains(scope)).map(|(key, _)| key.clone()).collect();
+        for (node, role, key) in lost {
+            self.unbind(node, role, &key);
+        }
+    }
+
+    /// The private-record warnings, one per kind.
+    fn warnings(&self) -> Vec<String> {
+        properties::dropped_warnings(&self.dropped)
+    }
+
+    fn known(doc: &Document, main: NodeId, key: &str) -> bool {
+        doc.node(main)
+            .is_some_and(|n| matches!(&n.kind, NodeKind::Component { props, .. } if matches!(props.get(key), Some(PropDef::Boolean { .. }))))
+    }
+
+    fn owner(doc: &Document, id: NodeId) -> Option<NodeId> {
+        let (mut current, mut seen) = (Some(id), BTreeSet::new());
+        for _ in 0..properties::MAX_CHAIN {
+            let id = current?;
+            if !seen.insert(id) {
+                return None;
+            }
+            let n = doc.node(id)?;
+            match &n.kind {
+                NodeKind::Instance { component, .. } => return Some(*component),
+                NodeKind::Component { .. } => return Some(id),
+                _ => current = n.parent,
+            }
+        }
+        None
+    }
+
+    /// Bind an unregistered Boolean field of `n` to its retained definition. False: it has no
+    /// valid provenance (the caller leaves the field out).
+    fn activate(&mut self, doc: &Document, n: &Node, main: NodeId, role: Role, key: &str) -> bool {
+        let Some(native) = self.native.get(&n.id) else { return false };
+        let Some(packet) = native.bindings.as_ref() else { return false };
+        let Some(tag) = self.native.get(&main).and_then(|n| n.main.as_ref()) else { return false };
+        let expected_main = if role == Role::Visible { packet.visible_main.unwrap_or(packet.main) } else { packet.main };
+        if !doc.node(main).is_some_and(|n| matches!(n.kind, NodeKind::Component { .. })) || packet.scope != tag.scope || expected_main != tag.origin {
+            return false;
+        }
+        let definition = match role {
+            Role::Value => native.values.get(key).copied(),
+            Role::Visible => packet.visible.as_ref().filter(|b| b.key == key).map(|b| b.definition),
+        };
+        let Some(definition) = definition else { return false };
+        if !self.names.contains_key(&(packet.scope.clone(), definition)) || self.active.len() >= properties::MAX_BINDINGS {
+            return false;
+        }
+        let scope = packet.scope.clone();
+        self.active.insert((n.id, role, key.into()), (scope, definition));
+        true
+    }
+
+    fn guid(&self, node: NodeId, role: Role, key: &str) -> Option<Kv<'static>> {
+        let resource = self.active.get(&(node, role, key.into()))?;
+        self.definitions.get(resource).map(|local| guid(AUX, *local))
+    }
+
+    /// The wire packets, within the byte budget our own importer accepts. A packet that does not
+    /// fit is left out; a catalog none of whose carriers fit is left out with its dependants.
+    fn finish(&mut self, page: u32) {
+        // Each round leaves out at least one catalog, so this ends.
+        loop {
+            // The private REST projection also holds each deduplicated catalog once at file level.
+            // Reserve those bytes before emitting packets so our own bounded importer accepts them.
+            let mut bytes = 0usize;
+            let mut oversized = BTreeSet::new();
+            for (scope, catalog) in &self.catalogs {
+                match properties::write_catalog(catalog)
+                    .ok()
+                    .and_then(|text| bytes.checked_add(text.len()))
+                    .filter(|n| *n <= properties::MAX_TOTAL_BYTES)
+                {
+                    Some(total) => bytes = total,
+                    None => {
+                        oversized.insert(scope.clone());
+                    }
+                }
+            }
+            if !oversized.is_empty() {
+                self.left_out(DROPPED_LIMIT, oversized.len());
+                self.drop_scopes(&oversized);
+                continue;
+            }
+            // Catalog carriers first: a scope that loses every carrier takes its dependants along.
+            self.packets.clear();
+            let carriers: Vec<(NodeId, String)> = self.native.iter().filter_map(|(id, meta)| Some((*id, meta.catalog.clone()?))).collect();
+            let mut carried = BTreeSet::new();
+            let mut lost = Vec::new();
+            for (id, scope) in carriers {
+                match self.wire_packet(id, page, bytes) {
+                    Some((total, raw)) => {
+                        bytes = total;
+                        carried.insert(scope);
+                        self.packets.insert(id, raw);
+                    }
+                    None => lost.push(id),
+                }
+            }
+            let uncarried: BTreeSet<String> = self.catalogs.keys().filter(|scope| !carried.contains(*scope)).cloned().collect();
+            if !uncarried.is_empty() {
+                self.left_out(DROPPED_LIMIT, uncarried.len());
+                self.drop_scopes(&uncarried);
+                continue;
+            }
+            let rest: Vec<NodeId> = self.native.keys().filter(|id| !self.packets.contains_key(*id) && !lost.contains(*id)).copied().collect();
+            for id in rest {
+                match self.wire_packet(id, page, bytes) {
+                    Some((total, raw)) => {
+                        bytes = total;
+                        self.packets.insert(id, raw);
+                    }
+                    None => lost.push(id),
+                }
+            }
+            for id in lost {
+                self.left_out(DROPPED_LIMIT, 1);
+                let aliases: Vec<_> = self
+                    .active
+                    .range((id, Role::Value, String::new())..)
+                    .take_while(|((node, _, _), _)| *node == id)
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                for (node, role, key) in aliases {
+                    self.unbind(node, role, &key);
+                }
+            }
+            return;
+        }
+    }
+
+    /// The wire packet of node `id` and the byte total with it, if it fits after `bytes`.
+    fn wire_packet(&self, id: NodeId, page: u32, bytes: usize) -> Option<(usize, String)> {
+        let meta = self.native.get(&id)?;
+        let catalog = meta.catalog.as_ref().and_then(|scope| self.catalogs.get(scope));
+        let resources = catalog.map(|c| WireResources {
+            scope: c.scope.clone(),
+            page: PropertyId { session: LAYERS, local: page },
+            owners: c
+                .owners
+                .iter()
+                .filter_map(|o| {
+                    Some(Remap { original: o.id, wire: PropertyId { session: LAYERS, local: *self.owners.get(&(c.scope.clone(), o.id))? } })
+                })
+                .collect(),
+            definitions: self
+                .definitions
+                .iter()
+                .filter(|((scope, _), _)| scope == &c.scope)
+                .map(|((_, original), local)| Remap { original: *original, wire: PropertyId { session: AUX, local: *local } })
+                .collect(),
+        });
+        let aliases = self
+            .active
+            .range((id, Role::Value, String::new())..)
+            .take_while(|((node, _, _), _)| *node == id)
+            .filter_map(|((_, role, key), resource)| {
+                Some(Alias {
+                    role: *role,
+                    key: key.clone(),
+                    definition: resource.1,
+                    wire: PropertyId { session: AUX, local: *self.definitions.get(resource)? },
+                })
+            })
+            .collect();
+        let packet = WirePacket {
+            version: properties::VERSION,
+            native: NativePacket { catalog: catalog.cloned(), main: meta.main.clone(), bindings: meta.bindings.clone() },
+            resources,
+            aliases,
+        };
+        let raw = properties::write_wire(&packet).ok()?;
+        Some((bytes.checked_add(raw.len()).filter(|n| *n <= properties::MAX_TOTAL_BYTES)?, raw))
+    }
+}
+
+/// PluginData is one array: keeping two fields with the same name would lose the later one.
+fn plugin_data(fields: &mut Fields, entry: Kv<'static>) {
+    if let Some((_, Kv::Array(entries))) = fields.iter_mut().find(|(key, _)| *key == "pluginData") {
+        entries.push(entry);
+    } else {
+        fields.push(("pluginData", arr(vec![entry])));
+    }
+}
+
 struct Exporter<'d> {
     doc: &'d Document,
     /// Layer → local id of its GUID (session [`LAYERS`]).
@@ -408,7 +979,8 @@ struct Exporter<'d> {
     files: Vec<(String, Arc<Vec<u8>>)>,
     /// Component property (name, type) → local id of its definition's GUID (session [`AUX`]).
     defs: BTreeMap<(String, &'static str), u32>,
-    /// Grid tracks of written grid frames: (columns, rows) local ids (session [`AUX`]).
+    /// Grid tracks of grid layers, each written layer and override its own: (columns, rows) local
+    /// ids (session [`AUX`]).
     tracks: BTreeMap<NodeId, (Vec<u32>, Vec<u32>)>,
     aux: u32,
     overlays: BTreeMap<NodeId, Overlay>,
@@ -422,6 +994,25 @@ struct Exporter<'d> {
     var_ids: BTreeMap<&'d str, u32>,
     mode_ids: BTreeMap<(&'d str, &'d str), u32>,
     warnings: Vec<String>,
+    unsupported_nested_structure: bool,
+    unsupported_unlinked_instance: bool,
+    properties: PropertyResources,
+    property_output_bytes: usize,
+    /// Nonzero while building an instance's comparison copy of a main layer: those fields are
+    /// compared, not written, so they are not charged to the output budgets.
+    comparing: usize,
+    /// Comparison copies by (main-side layer, instance root?): built once, shared by every
+    /// instance of that main.
+    comparisons: BTreeMap<(NodeId, bool), Rc<Fields>>,
+    /// Text and packets built for comparison copies, against their own (generous) limit: past
+    /// it a copy leaves them out, so the instance layer writes them as overrides in full.
+    compare_cost: DecodeCost,
+    compare_limit: DecodeCost,
+    /// Text or packets left out of comparison copies past `compare_limit`.
+    compare_degraded: usize,
+    /// Across all written text construction (comparison copies excluded).
+    text_decode_cost: DecodeCost,
+    text_decode_limit: bool,
 }
 
 /// The variables bound to one layer, as the fields that carry them: paints by (fills?, index),
@@ -437,8 +1028,8 @@ struct Bound {
 }
 
 impl<'d> Exporter<'d> {
-    fn new(doc: &'d Document) -> Self {
-        Self {
+    fn new(doc: &'d Document) -> Result<Self, FormatError> {
+        Ok(Self {
             doc,
             ids: BTreeMap::new(),
             nodes: Vec::new(),
@@ -456,7 +1047,18 @@ impl<'d> Exporter<'d> {
             var_ids: BTreeMap::new(),
             mode_ids: BTreeMap::new(),
             warnings: Vec::new(),
-        }
+            unsupported_nested_structure: false,
+            unsupported_unlinked_instance: false,
+            properties: PropertyResources::new(doc),
+            property_output_bytes: 0,
+            comparing: 0,
+            comparisons: BTreeMap::new(),
+            compare_cost: DecodeCost::default(),
+            compare_limit: DecodeCost { bytes: super::kiwi::MAX_DECODE_BYTES.saturating_mul(2), values: super::kiwi::MAX_VALUES.saturating_mul(2) },
+            compare_degraded: 0,
+            text_decode_cost: DecodeCost::default(),
+            text_decode_limit: false,
+        })
     }
 
     fn warn(&mut self, w: &str) {
@@ -475,9 +1077,41 @@ impl<'d> Exporter<'d> {
     }
 
     /// The message: the document, its pages and their layers, and the blobs.
-    fn message(&mut self) -> Kv<'static> {
+    fn message(&mut self) -> Result<Kv<'static>, FormatError> {
         let doc = self.doc;
         self.assign();
+        // The hidden definitions can affect REST name canonicalization. Refuse a collision
+        // with live names rather than rebinding an unrelated visible component property.
+        let live_names: BTreeSet<&str> = self.defs.keys().map(|(name, _)| name.as_str()).collect();
+        let colliding: BTreeSet<String> = self
+            .properties
+            .catalogs
+            .iter()
+            .filter(|(_, c)| c.owners.iter().flat_map(|o| &o.definitions).any(|d| live_names.contains(d.name.as_str())))
+            .map(|(scope, _)| scope.clone())
+            .collect();
+        self.properties.left_out(DROPPED_COLLISION, colliding.len());
+        self.properties.drop_scopes(&colliding);
+        let mut unwritten = Vec::new();
+        for (id, role, key) in self.properties.active.keys() {
+            let owner = match role {
+                Role::Value => PropertyResources::owner(doc, *id),
+                Role::Visible => doc.node(*id).and_then(|n| {
+                    if matches!(n.kind, NodeKind::Component { .. }) {
+                        Some(*id)
+                    } else {
+                        n.parent.and_then(|parent| PropertyResources::owner(doc, parent))
+                    }
+                }),
+            };
+            if !owner.is_some_and(|main| self.ids.contains_key(&main)) {
+                unwritten.push((*id, *role, key.clone()));
+            }
+        }
+        for (id, role, key) in unwritten {
+            self.properties.unbind(id, role, &key);
+        }
+        self.properties.finish(u32::try_from(self.ids.len() + 1).map_err(|_| too_large())?);
         let profile = if doc.color_profile == figcraft_doc::color::ColorProfile::DisplayP3 { "DISPLAY_P3" } else { "SRGB" };
         let mut root: Fields = vec![("guid", guid(0, 0)), ("phase", e("CREATED")), ("type", e("DOCUMENT")), ("name", s(&doc.name))];
         root.extend(root_fields());
@@ -485,26 +1119,39 @@ impl<'d> Exporter<'d> {
         self.nodes.push(o(root));
         for (i, p) in doc.pages.iter().enumerate() {
             self.emit(*p, guid(0, 0), i, None, 0);
+            if self.text_decode_limit {
+                return Err(too_large());
+            }
         }
         self.assets(doc.pages.len());
+        if self.text_decode_limit {
+            return Err(too_large());
+        }
         if !doc.comments.is_empty() {
             self.warn("comments were left out");
         }
+        for w in self.properties.warnings() {
+            self.warn(&w);
+        }
         let mut blobs: Vec<(u32, Vec<u8>)> = std::mem::take(&mut self.blobs).into_iter().map(|(bytes, i)| (i, bytes)).collect();
         blobs.sort_by_key(|x| x.0);
-        o(vec![
+        Ok(o(vec![
             ("type", e("NODE_CHANGES")),
             ("sessionID", u(0)),
             ("nodeChanges", arr(std::mem::take(&mut self.nodes))),
             ("blobs", arr(blobs.into_iter().map(|(_, bytes)| o(vec![("bytes", Kv::Bytes(bytes))])).collect())),
-        ])
+        ]))
     }
 
     /// GUIDs for every layer (pages first, then depth-first), component property definitions,
     /// flow starting points and overlay settings, before anything refers to them.
     fn assign(&mut self) {
         let doc = self.doc;
-        let mut stack: Vec<NodeId> = doc.pages.iter().rev().copied().collect();
+        let mut roots = doc.pages.clone();
+        if let Some(store) = doc.library_store() {
+            roots.extend(doc.node(store).into_iter().flat_map(|n| n.children.iter().copied()));
+        }
+        let mut stack: Vec<NodeId> = roots.into_iter().rev().collect();
         while let Some(id) = stack.pop() {
             let Some(n) = doc.node(id) else { continue };
             if self.ids.len() >= MAX_NODES {
@@ -569,6 +1216,22 @@ impl<'d> Exporter<'d> {
                 self.var_ids.entry(v.id.as_str()).or_insert_with(&mut node);
             }
         }
+        for (scope, catalog) in &self.properties.catalogs {
+            for owner in &catalog.owners {
+                let local = node();
+                self.properties.owners.insert((scope.clone(), owner.id), local);
+            }
+        }
+        let resource_defs: BTreeSet<(String, PropertyId)> = self
+            .properties
+            .catalogs
+            .iter()
+            .flat_map(|(scope, c)| c.owners.iter().flat_map(move |o| o.definitions.iter().map(move |d| (scope.clone(), d.id))))
+            .collect();
+        for resource in resource_defs {
+            let local = self.next_aux();
+            self.properties.definitions.insert(resource, local);
+        }
         for c in &doc.variables.collections {
             for m in &c.modes {
                 if !self.mode_ids.contains_key(&(c.id.as_str(), m.id.as_str())) {
@@ -583,7 +1246,8 @@ impl<'d> Exporter<'d> {
     /// collections and the variables, each a node of its own.
     fn assets(&mut self, pages: usize) {
         let doc = self.doc;
-        if self.style_ids.is_empty() && self.set_ids.is_empty() {
+        let library_roots = doc.library_store().and_then(|id| doc.node(id)).map(|n| n.children.as_slice()).unwrap_or_default();
+        if self.style_ids.is_empty() && self.set_ids.is_empty() && self.properties.catalogs.is_empty() && library_roots.is_empty() {
             return;
         }
         let page = u32::try_from(self.ids.len() + 1).unwrap_or(u32::MAX);
@@ -598,6 +1262,10 @@ impl<'d> Exporter<'d> {
         f.push(("internalOnly", b(true)));
         self.nodes.push(o(f));
         let mut index = 0usize;
+        for id in library_roots {
+            self.emit(*id, guid(LAYERS, page), index, None, 0);
+            index += 1;
+        }
         let mut head = |local: u32, ty: &'static str, name: &str| -> Fields {
             index += 1;
             vec![
@@ -609,8 +1277,31 @@ impl<'d> Exporter<'d> {
                 ("sortPosition", s(&position(index))),
             ]
         };
+        for (scope, catalog) in &self.properties.catalogs {
+            for owner in &catalog.owners {
+                let local = self.properties.owners[&(scope.clone(), owner.id)];
+                let mut f = head(local, "SYMBOL", &owner.name);
+                f.extend(root_fields());
+                let defs = owner
+                    .definitions
+                    .iter()
+                    .map(|d| {
+                        let local = self.properties.definitions[&(scope.clone(), d.id)];
+                        let mut fields = vec![("id", guid(AUX, local)), ("name", s(&d.name)), ("type", e("BOOL"))];
+                        if let Some(initial) = d.initial {
+                            fields.push(("initialValue", o(vec![("boolValue", b(initial))])));
+                        }
+                        o(fields)
+                    })
+                    .collect();
+                f.push(("componentPropDefs", arr(defs)));
+                self.nodes.push(o(f));
+            }
+        }
         for st in &doc.styles {
-            let Some(&local) = self.style_ids.get(st.id.as_str()) else { continue };
+            let Some(&local) = self.style_ids.get(st.id.as_str()) else {
+                continue;
+            };
             // A sample layer that shows the style: a square for paints and effects, a frame for
             // grids, two letters for text.
             let (ty, kind) = match &st.kind {
@@ -689,7 +1380,9 @@ impl<'d> Exporter<'d> {
             let resolved = resolved_type(v.kind);
             let mut values = Vec::new();
             for m in &c.modes {
-                let (Some(mode), Some(val)) = (self.mode_ids.get(&(c.id.as_str(), m.id.as_str())), v.values.get(&m.id)) else { continue };
+                let (Some(mode), Some(val)) = (self.mode_ids.get(&(c.id.as_str(), m.id.as_str())), v.values.get(&m.id)) else {
+                    continue;
+                };
                 let (ty, value) = match val {
                     VariableValue::Color(x) => ("COLOR", ("colorValue", color(*x))),
                     VariableValue::Number(x) => ("FLOAT", ("floatValue", fl(*x))),
@@ -848,7 +1541,9 @@ impl<'d> Exporter<'d> {
     /// Write layer `id` (child `index` of the layer with GUID `parent_guid`) and its subtree.
     fn emit(&mut self, id: NodeId, parent_guid: Kv<'static>, index: usize, parent: Option<&Node>, depth: usize) {
         let doc = self.doc;
-        let (Some(&local), Some(n)) = (self.ids.get(&id), doc.node(id)) else { return };
+        let (Some(&local), Some(n)) = (self.ids.get(&id), doc.node(id)) else {
+            return;
+        };
         if depth > MAX_DEPTH {
             self.warn("layers nested deeper than 256 levels were left out");
             return;
@@ -869,6 +1564,7 @@ impl<'d> Exporter<'d> {
                 self.warn("prototype device settings were left out");
             }
             self.modes(n, &mut f);
+            self.property_packet(n, &mut f);
             true
         } else {
             self.layer(n, parent, &mut f, false)
@@ -882,7 +1578,7 @@ impl<'d> Exporter<'d> {
     }
 
     /// The fields of layer `n` (whose parent is `parent`). `nested`: for an instance's override
-    /// (no type, no instance or component data). Returns whether its children are written as
+    /// (no instance expansion or component definitions). Returns whether its children are written as
     /// layers (an instance's come from its main).
     fn layer(&mut self, n: &Node, parent: Option<&Node>, f: &mut Fields, nested: bool) -> bool {
         let doc = self.doc;
@@ -892,7 +1588,7 @@ impl<'d> Exporter<'d> {
             // (which the import puts back).
             self.warn("strokes wider on one side of their path were written as filled outlines (the stroke itself is kept for FigCraft)");
             let children = self.layer(&outline, parent, f, nested);
-            f.push(("pluginData", arr(vec![o(vec![("pluginID", s(STASH.0)), ("value", s(&original)), ("key", s(STASH.1))])])));
+            plugin_data(f, o(vec![("pluginID", s(STASH.0)), ("value", s(&original)), ("key", s(STASH.1))]));
             return children;
         }
         let main = match &n.kind {
@@ -921,9 +1617,7 @@ impl<'d> Exporter<'d> {
             NodeKind::Instance { .. } => "INSTANCE",
             NodeKind::Slice => "SLICE",
         };
-        if !nested {
-            f.push(("type", e(ty)));
-        }
+        f.push(("type", e(ty)));
         f.push(("name", s(&n.name)));
         self.common(n, parent, f);
         match &n.kind {
@@ -966,9 +1660,14 @@ impl<'d> Exporter<'d> {
                     f.push(("symbolDescription", s(description)));
                 }
             }
-            NodeKind::Instance { props, .. } if !nested => {
+            NodeKind::Instance { props, .. } => {
                 if let Some(main) = main {
-                    self.instance(n, main, props, f);
+                    if nested {
+                        // An empty list clears assignments inherited from the source instance.
+                        f.push(("componentPropAssignments", arr(self.property_assignments(n, props))));
+                    } else {
+                        self.instance(n, main, props, f);
+                    }
                 }
             }
             _ => {}
@@ -994,12 +1693,16 @@ impl<'d> Exporter<'d> {
             ("transform", matrix(n.transform)),
         ]);
         if n.is_mask {
-            let ty = match n.mask_type {
+            f.push(("mask", b(true)));
+        }
+        // Retain inactive non-default types; ordinary inactive ALPHA stays omitted.
+        if n.is_mask || n.mask_type != MaskType::Alpha {
+            let mask_type = match n.mask_type {
                 MaskType::Alpha => "ALPHA",
                 MaskType::Vector => "OUTLINE",
                 MaskType::Luminance => "LUMINANCE",
             };
-            f.extend([("mask", b(true)), ("maskType", e(ty))]);
+            f.push(("maskType", e(mask_type)));
         }
         let bound = self.bound(n);
         // Text whose own style sets fills paints with them (the layer's fills only show through
@@ -1066,17 +1769,31 @@ impl<'d> Exporter<'d> {
             f.push(("exportSettings", arr(n.exports.iter().map(export_setting).collect())));
         }
         self.prototype(n, f);
-        let refs: Vec<Kv> = n.prop_refs.iter().filter_map(|(field, prop)| self.prop_ref(field, prop)).collect();
+        let refs: Vec<Kv> = n.prop_refs.iter().filter_map(|(field, prop)| self.prop_ref(n, field, prop)).collect();
         if !refs.is_empty() {
             f.push(("parameterConsumptionMap", o(vec![("entries", arr(refs))])));
         }
         let text = matches!(n.kind, NodeKind::Text(_));
+        // Readers take a linked text's typography from its style over the layer's own copy, so a
+        // layer with typography of its own keeps it as values, without the link.
+        let own_typography = match (&n.kind, n.styles.text.as_deref().and_then(|id| self.doc.style(id))) {
+            (NodeKind::Text(td), Some(st)) => match &st.kind {
+                // Only the bound field can resolve differently in a layer's modes.
+                StyleKind::Text { style } => !same_typography(&td.style, style, |field| st.bound.contains_key(field)),
+                _ => false,
+            },
+            _ => false,
+        };
+        if own_typography {
+            self.warn("text style links of layers with their own font, size, line height or letter spacing were left out (they keep the values)");
+        }
+        let text_link = if own_typography { &None } else { &n.styles.text };
         let links = [
             ("styleIdForFill", &n.styles.fill, true),
             ("styleIdForStrokeFill", &n.styles.stroke, true),
             ("styleIdForEffect", &n.styles.effect, true),
             ("styleIdForGrid", &n.styles.grid, n.kind.is_frame_like()),
-            ("styleIdForText", &n.styles.text, text),
+            ("styleIdForText", text_link, text),
         ];
         for (key, id, fits) in links {
             let Some(id) = id else { continue };
@@ -1085,9 +1802,9 @@ impl<'d> Exporter<'d> {
                 None => self.warn("links to shared styles that aren't in the document were left out (their layers keep the values)"),
             }
         }
+        // Only the layer as a whole can link a text style: chars linked to another style lose it.
         if let NodeKind::Text(td) = &n.kind
-            && n.styles.text.is_none()
-            && std::iter::once(&td.style).chain(td.runs.iter().map(|r| &r.style)).any(|st| st.style_id.is_some())
+            && std::iter::once(&td.style).chain(td.runs.iter().map(|r| &r.style)).any(|st| st.style_id.is_some() && st.style_id != *text_link)
         {
             self.warn("text styles applied to part of a text were written as their values");
         }
@@ -1101,8 +1818,30 @@ impl<'d> Exporter<'d> {
         if !n.annotations.is_empty() || !n.dev_resources.is_empty() || !n.code_links.is_empty() || !n.dev_status.is_none() {
             self.warn("Dev Mode annotations, statuses, resources and code links were left out");
         }
-        if !n.plugin_data.is_empty() {
+        self.property_packet(n, f);
+        if n.plugin_data.keys().any(|key| ![properties::CATALOG_KEY, properties::MAIN_KEY, properties::BINDINGS_KEY].contains(&key.as_str())) {
             self.warn("plugin data was left out");
+        }
+    }
+
+    fn property_packet(&mut self, n: &Node, fields: &mut Fields) {
+        let Some(len) = self.properties.packets.get(&n.id).map(String::len) else { return };
+        // Comparison copies of a main layer are not written (they have a budget of their own);
+        // everything else is charged.
+        if self.comparing > 0 {
+            if !self.compare_charge(DecodeCost { bytes: len, values: 1 }) {
+                self.compare_degraded += 1;
+                return;
+            }
+        } else {
+            let Some(bytes) = self.property_output_bytes.checked_add(len).filter(|n| *n <= 4 * properties::MAX_TOTAL_BYTES) else {
+                self.properties.left_out(DROPPED_LIMIT, 1);
+                return;
+            };
+            self.property_output_bytes = bytes;
+        }
+        if let Some(packet) = self.properties.packets.get(&n.id) {
+            plugin_data(fields, o(vec![("pluginID", s(properties::PLUGIN_ID)), ("key", s(properties::PLUGIN_KEY)), ("value", s(packet))]));
         }
     }
 
@@ -1298,14 +2037,9 @@ impl<'d> Exporter<'d> {
         ];
         f.extend(vars.into_iter().filter_map(|(ours, key)| Some((key, bound.effects.get(&(index, ours))?.clone()))));
         let blur = |f: &mut Fields, ty: &'static str, bl: &figcraft_doc::Blur| {
-            f.extend([("type", e(ty)), ("radius", fl(bl.radius))]);
+            f.extend([("type", e(ty)), ("radius", fl(bl.radius)), ("startRadius", fl(bl.start_radius))]);
             if bl.blur_type == figcraft_doc::BlurType::Progressive {
-                f.extend([
-                    ("blurOpType", e("PROGRESSIVE")),
-                    ("startRadius", fl(bl.start_radius)),
-                    ("startOffset", xy(bl.start.0, bl.start.1)),
-                    ("endOffset", xy(bl.end.0, bl.end.1)),
-                ]);
+                f.extend([("blurOpType", e("PROGRESSIVE")), ("startOffset", xy(bl.start.0, bl.start.1)), ("endOffset", xy(bl.end.0, bl.end.1))]);
             }
         };
         let grain = |size: f64, size_y: Option<f64>| xy(size, size_y.unwrap_or(size));
@@ -1400,14 +2134,7 @@ impl<'d> Exporter<'d> {
             ("stackReverseZIndex", b(l.reverse_z)),
         ]);
         if grid {
-            // Instance layers share their main layer's track ids, so unchanged tracks and the cells
-            // their layers sit in still match.
-            let key = self.main_layer(n.id);
-            let (want_c, want_r) = (l.grid_columns.min(1000) as usize, l.grid_rows.min(1000) as usize);
-            let (cols, rows) = match self.tracks.get(&key) {
-                Some((c, r)) if (c.len(), r.len()) == (want_c, want_r) => (c.clone(), r.clone()),
-                _ => ((0..want_c).map(|_| self.next_aux()).collect(), (0..want_r).map(|_| self.next_aux()).collect()),
-            };
+            let (cols, rows) = self.grid_tracks(n.id, l);
             let map = |ids: &[u32]| {
                 o(vec![(
                     "entries",
@@ -1418,7 +2145,6 @@ impl<'d> Exporter<'d> {
             if l.column_tracks.iter().chain(&l.row_tracks).any(|t| t.sizing != Sizing::Fill) {
                 self.warn("grid tracks of fixed or content size were written as equal tracks");
             }
-            self.tracks.insert(key, (cols, rows));
         } else {
             let spread = l.content_align == ContentAlign::SpaceBetween;
             f.extend([
@@ -1429,9 +2155,18 @@ impl<'d> Exporter<'d> {
         }
     }
 
-    /// How a layer sizes and sits in its auto layout parent.
+    /// A layer's box limits and positioning, and its sizing in an auto layout parent.
     fn child_layout(&mut self, n: &Node, parent: Option<&Node>, f: &mut Fields) {
         let cl = &n.child_layout;
+        // The importer retains these fields even when the parent has no auto layout.
+        if cl.absolute {
+            f.push(("stackPositioning", e("ABSOLUTE")));
+        }
+        for (key, w, h) in [("minSize", cl.min_w, cl.min_h), ("maxSize", cl.max_w, cl.max_h)] {
+            if w.is_some() || h.is_some() {
+                f.push((key, o(vec![("value", xy(w.unwrap_or(0.0), h.unwrap_or(0.0)))])));
+            }
+        }
         let Some(pl) = parent.and_then(|p| p.layout.as_ref()) else { return };
         let (fill_h, fill_v) = (cl.sizing_h == Sizing::Fill, cl.sizing_v == Sizing::Fill);
         let (grow, stretch) = if pl.mode == LayoutMode::Vertical { (fill_v, fill_h) } else { (fill_h, fill_v) };
@@ -1441,17 +2176,12 @@ impl<'d> Exporter<'d> {
         if stretch {
             f.push(("stackChildAlignSelf", e("STRETCH")));
         }
-        if cl.absolute {
-            f.push(("stackPositioning", e("ABSOLUTE")));
-        }
-        for (key, w, h) in [("minSize", cl.min_w, cl.min_h), ("maxSize", cl.max_w, cl.max_h)] {
-            if w.is_some() || h.is_some() {
-                f.push((key, o(vec![("value", xy(w.unwrap_or(0.0), h.unwrap_or(0.0)))])));
-            }
-        }
         if pl.mode == LayoutMode::Grid
-            && let Some((cols, rows)) = parent.and_then(|p| self.tracks.get(&self.main_layer(p.id)))
+            && let Some(p) = parent
         {
+            // An instance writes its layers' overrides before its own layout: take (or allocate)
+            // the parent's tracks here, the parent's layout then reuses them.
+            let (cols, rows) = &self.grid_tracks(p.id, pl);
             let anchor = |ids: &[u32], i: Option<u32>| i.and_then(|i| ids.get(i as usize)).map(|t| guid(AUX, *t));
             let (c, r) = (anchor(cols, cl.grid_column), anchor(rows, cl.grid_row));
             f.extend(c.map(|g| ("gridColumnAnchor", g)));
@@ -1465,9 +2195,61 @@ impl<'d> Exporter<'d> {
         }
     }
 
+    /// The (columns, rows) track ids of grid layer `id` with layout `l`, allocated once per layer
+    /// so instance comparison copies never replace them. An instance layer starts from its main
+    /// layer's ids, so unchanged tracks and the cells its layers sit in still match.
+    fn grid_tracks(&mut self, id: NodeId, l: &AutoLayout) -> (Vec<u32>, Vec<u32>) {
+        let want = |l: &AutoLayout| (l.grid_columns.min(1000) as usize, l.grid_rows.min(1000) as usize);
+        let fits = |t: &(Vec<u32>, Vec<u32>), w: (usize, usize)| (t.0.len(), t.1.len()) == w;
+        let w = want(l);
+        if let Some(t) = self.tracks.get(&id).filter(|t| fits(t, w)) {
+            return t.clone();
+        }
+        let (doc, main) = (self.doc, self.main_layer(id));
+        if main != id
+            && !self.tracks.contains_key(&main)
+            && let Some(ml) = doc.node(main).and_then(|m| m.layout.as_ref()).filter(|ml| ml.mode == LayoutMode::Grid)
+        {
+            let t = self.new_tracks(want(ml));
+            self.tracks.insert(main, t);
+        }
+        let t = match self.tracks.get(&main).filter(|t| fits(t, w)) {
+            Some(t) => t.clone(),
+            None => self.new_tracks(w),
+        };
+        self.tracks.insert(id, t.clone());
+        t
+    }
+
+    fn new_tracks(&mut self, (cols, rows): (usize, usize)) -> (Vec<u32>, Vec<u32>) {
+        ((0..cols).map(|_| self.next_aux()).collect(), (0..rows).map(|_| self.next_aux()).collect())
+    }
+
     /// Text: its style, box settings, and characters with their styled runs. `fills`: the layer's
     /// (what runs without fills of their own show when the text's own style sets other fills).
     fn text(&mut self, td: &TextData, fills: &[Paint], f: &mut Fields) {
+        if self.text_decode_limit {
+            return;
+        }
+        let spans = td.spans();
+        // Preflight borrowed styles/paints before allocating a table or copying row strings. An
+        // instance's comparison copy of its main's text is not written: it is charged to the
+        // comparison budget instead, and left out past it.
+        if self.comparing > 0 {
+            let cost = text_decode_cost(td, fills, &spans, DecodeCost::default());
+            if !cost.is_ok_and(|cost| self.compare_charge(cost)) {
+                self.compare_degraded += 1;
+                return;
+            }
+        } else {
+            match text_decode_cost(td, fills, &spans, self.text_decode_cost) {
+                Ok(cost) => self.text_decode_cost = cost,
+                Err(_) => {
+                    self.text_decode_limit = true;
+                    return;
+                }
+            }
+        }
         style_fields(&td.style, f);
         let (ha, va) = (
             match td.align_h {
@@ -1510,22 +2292,20 @@ impl<'d> Exporter<'d> {
         if td.max_lines > 0 {
             f.push(("maxLines", int(td.max_lines.into())));
         }
-        // Styles per UTF-16 unit: 0 for the base style, else an entry of the override table.
+        // Styles per UTF-16 unit: 0 for a base-style gap, else the original run's table entry.
         if td.char_count() > MAX_CHARS {
             self.warn("text longer than 1,048,576 characters was cut");
         }
-        let spans = td.spans();
         let mut table: Vec<&TextStyle> = Vec::new();
         let mut span_ids = Vec::with_capacity(spans.len());
-        for (_, _, st) in &spans {
-            span_ids.push(if **st == td.style {
+        for (start, _, st) in &spans {
+            span_ids.push(if *start >= MAX_CHARS || std::ptr::eq(*st, &td.style) {
                 0
             } else {
-                let i = table.iter().position(|t| *t == *st).unwrap_or_else(|| {
-                    table.push(st);
-                    table.len() - 1
-                });
-                i as u32 + 1
+                // Equal neighboring styles still represent distinct native run ranges. Use a
+                // separate standard override ID for each, including explicit base-equal runs.
+                table.push(*st);
+                table.len() as u32
             });
         }
         let mut chars = String::new();
@@ -1551,6 +2331,10 @@ impl<'d> Exporter<'d> {
                 .map(|(st, id)| {
                     let mut ef: Fields = vec![("styleID", u(id))];
                     style_fields(st, &mut ef);
+                    if unlinks(st, &td.style) {
+                        // An empty URL keeps the base's link off these chars.
+                        ef.push(("hyperlink", o(vec![("url", s(""))])));
+                    }
                     if let Some(p) = st.fills.as_deref().or(td.style.fills.as_ref().map(|_| fills)) {
                         ef.push(("fillPaints", self.paints(p, true, &Bound::default())));
                     }
@@ -1745,7 +2529,9 @@ impl<'d> Exporter<'d> {
                 NodeKind::Text(_) => None,
                 _ => figcraft_doc::geometry::shape_path(n),
             };
-            let Some(path) = path.filter(|p| !p.elements().is_empty()) else { return };
+            let Some(path) = path.filter(|p| !p.elements().is_empty()) else {
+                return;
+            };
             use figcraft_doc::geom::kurbo::{Cap, Join, Stroke, StrokeOpts, stroke};
             let cap = match sp.cap_start {
                 StrokeCap::Round => Cap::Round,
@@ -1797,7 +2583,7 @@ impl<'d> Exporter<'d> {
     }
 
     /// Which property controls a layer's `field`.
-    fn prop_ref(&mut self, field: &str, prop: &str) -> Option<Kv<'static>> {
+    fn prop_ref(&mut self, n: &Node, field: &str, prop: &str) -> Option<Kv<'static>> {
         let (var_field, ty, resolved) = match field {
             "visible" => ("VISIBLE", "BOOL", "BOOLEAN"),
             "characters" => ("TEXT_DATA", "TEXT", "TEXT_DATA"),
@@ -1807,37 +2593,69 @@ impl<'d> Exporter<'d> {
                 return None;
             }
         };
-        let id = *self.defs.get(&(prop.to_string(), ty))?;
-        let data = o(vec![
-            ("value", o(vec![("propRefValue", o(vec![("defId", guid(AUX, id))]))])),
-            ("dataType", e("PROP_REF")),
-            ("resolvedDataType", e(resolved)),
-        ]);
+        if field == "visible" && self.properties.is_unbound(n.id, Role::Visible, prop) {
+            return None;
+        }
+        let id = (field == "visible")
+            .then(|| self.properties.guid(n.id, Role::Visible, prop))
+            .flatten()
+            .or_else(|| self.defs.get(&(prop.to_string(), ty)).map(|id| guid(AUX, *id)))?;
+        let data =
+            o(vec![("value", o(vec![("propRefValue", o(vec![("defId", id)]))])), ("dataType", e("PROP_REF")), ("resolvedDataType", e(resolved))]);
         Some(o(vec![("variableData", data), ("variableField", e(var_field))]))
+    }
+
+    /// Charges `cost` to the comparison budget; `false` (nothing charged) past its limit.
+    fn compare_charge(&mut self, cost: DecodeCost) -> bool {
+        let Ok(total) = self.compare_cost.add(cost) else { return false };
+        if total.bytes > self.compare_limit.bytes || total.values > self.compare_limit.values {
+            return false;
+        }
+        self.compare_cost = total;
+        true
+    }
+
+    /// The fields of main-side layer `src` an instance layer is compared with (`root`: the
+    /// instance's main itself, without the fields an instance keeps as its own). Built once per
+    /// layer, so comparing costs no more than building the mains, however many instances.
+    fn comparison(&mut self, src: &Node, root: bool) -> Rc<Fields> {
+        if let Some(theirs) = self.comparisons.get(&(src.id, root)) {
+            return Rc::clone(theirs);
+        }
+        let doc = self.doc;
+        let mut theirs = Vec::new();
+        self.comparing += 1;
+        self.layer(src, src.parent.and_then(|p| doc.node(p)), &mut theirs, true);
+        self.comparing -= 1;
+        if root {
+            theirs.retain(|(k, _)| !INSTANCE_OWN.contains(k));
+        }
+        let theirs = Rc::new(theirs);
+        self.comparisons.insert((src.id, root), Rc::clone(&theirs));
+        theirs
     }
 
     /// An instance: its main, the fields it and its layers override, the size, place and outline
     /// its layers get from that (derived data), its property values. `f`: its own fields so far.
     fn instance(&mut self, n: &Node, main: NodeId, props: &BTreeMap<String, Value>, f: &mut Fields) {
-        const OWN: [&str; 7] = ["guid", "phase", "parentIndex", "type", "transform", "fillGeometry", "strokeGeometry"];
         let doc = self.doc;
-        let (Some(m), Some(symbol)) = (doc.node(main), self.guid_of(main)) else { return };
+        let (Some(m), Some(symbol)) = (doc.node(main), self.guid_of(main)) else {
+            return;
+        };
         // What the instance itself changes from its main (its size, its paints, …) is an override
         // addressed by the main's id: a reader takes everything else from the main. Where it sits
         // is its own.
-        let mut root_theirs = Vec::new();
-        self.layer(m, m.parent.and_then(|p| doc.node(p)), &mut root_theirs, true);
-        root_theirs.retain(|(k, _)| !OWN.contains(k));
+        let root_theirs = self.comparison(m, true);
         // An instance is named after its component (the set, for a variant) until renamed.
         let set = m.parent.and_then(|p| doc.node(p)).filter(|p| matches!(p.kind, NodeKind::ComponentSet { .. }));
         let named = set.is_none_or(|s| s.name != n.name);
-        let root_mine: Fields = f.iter().filter(|(k, _)| !OWN.contains(k) && (named || *k != "name")).cloned().collect();
+        let root_mine: Fields = f.iter().filter(|(k, _)| !INSTANCE_OWN.contains(k) && (named || *k != "name")).cloned().collect();
         // Each layer below: its id path, the fields that differ from the main's layer, that layer's
         // fields, and the component a nested instance was swapped for.
         struct Row {
             path: Kv<'static>,
             changed: Fields,
-            theirs: Fields,
+            theirs: Rc<Fields>,
             nested: bool,
             swap: Option<Kv<'static>>,
         }
@@ -1853,13 +2671,26 @@ impl<'d> Exporter<'d> {
             stack.extend(d.children.iter().rev().map(|c| (*c, id)));
             let path = self.layer_path(d, n.id, main, 0);
             let guids: Option<Vec<Kv>> = path.and_then(|p| p.iter().map(|x| self.guid_of(*x)).collect());
-            let (Some(guids), Some(src)) = (guids, d.source.and_then(|src| doc.node(src))) else {
+            let (Some(guids), Some(src)) = (guids, self.layer_source(d, 0).and_then(|src| doc.node(src))) else {
+                if matches!(&d.kind, NodeKind::Instance { .. }) {
+                    self.unsupported_unlinked_instance = true;
+                    return;
+                }
                 self.warn("instance layers that don't come from their main component were left out");
                 continue;
             };
-            let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+            let mut mine = Vec::new();
             self.layer(d, doc.node(parent), &mut mine, true);
-            self.layer(src, src.parent.and_then(|p| doc.node(p)), &mut theirs, true);
+            let theirs = self.comparison(src, false);
+            // Instance children are expanded from their main, not emitted as ordinary node changes.
+            // Check the written types: an instance with a missing main is also written as a frame.
+            if theirs.iter().find(|(k, _)| *k == "type").and_then(|(_, v)| v.str()) == Some("INSTANCE")
+                && mine.iter().find(|(k, _)| *k == "type").and_then(|(_, v)| v.str()) != Some("INSTANCE")
+                && !d.children.is_empty()
+            {
+                self.unsupported_nested_structure = true;
+                return;
+            }
             // A nested instance swapped for another component.
             let swap = match (&d.kind, &src.kind) {
                 (NodeKind::Instance { component, .. }, NodeKind::Instance { component: was, .. }) if component == was => None,
@@ -1920,6 +2751,16 @@ impl<'d> Exporter<'d> {
         if !derived.is_empty() {
             f.push(("derivedSymbolData", arr(derived)));
         }
+        let assignments = self.property_assignments(n, props);
+        if !assignments.is_empty() {
+            f.push(("componentPropAssignments", arr(assignments)));
+        }
+        if n.children.iter().filter_map(|c| doc.node(*c)).any(|c| self.layer_source(c, 0).is_none()) {
+            self.warn("instance layers that don't come from their main component were left out");
+        }
+    }
+
+    fn property_assignments(&self, n: &Node, props: &BTreeMap<String, Value>) -> Vec<Kv<'static>> {
         let mut assignments = Vec::new();
         for (name, v) in props {
             let (ty, value) = match v {
@@ -1928,17 +2769,21 @@ impl<'d> Exporter<'d> {
                 Value::Number(c) => ("INSTANCE_SWAP", c.as_u64().and_then(|c| self.guid_of(NodeId(c))).map(|g| o(vec![("guidValue", g)]))),
                 _ => continue,
             };
+            // A Boolean whose retained provenance is gone is left out rather than written
+            // against a same-named definition of another component.
+            if ty == "BOOL" && self.properties.is_unbound(n.id, Role::Value, name) {
+                continue;
+            }
             // Variant values have no definition of their own: the main they show says them.
-            if let (Some(&id), Some(value)) = (self.defs.get(&(name.clone(), ty)), value) {
-                assignments.push(o(vec![("defID", guid(AUX, id)), ("value", value)]));
+            let id = (ty == "BOOL")
+                .then(|| self.properties.guid(n.id, Role::Value, name))
+                .flatten()
+                .or_else(|| self.defs.get(&(name.clone(), ty)).map(|id| guid(AUX, *id)));
+            if let (Some(id), Some(value)) = (id, value) {
+                assignments.push(o(vec![("defID", id), ("value", value)]));
             }
         }
-        if !assignments.is_empty() {
-            f.push(("componentPropAssignments", arr(assignments)));
-        }
-        if n.children.iter().filter_map(|c| doc.node(*c)).any(|c| c.source.is_none()) {
-            self.warn("instance layers that don't come from their main component were left out");
-        }
+        assignments
     }
 
     /// The main component layer an instance or instance layer mirrors (through nested instances),
@@ -1963,7 +2808,7 @@ impl<'d> Exporter<'d> {
     /// or, inside a nested instance swapped for another component, the path of that instance and
     /// then the one inside its new main.
     fn layer_path(&self, d: &Node, inst: NodeId, main: NodeId, depth: usize) -> Option<Vec<NodeId>> {
-        let src = d.source?;
+        let src = self.layer_source(d, 0)?;
         if let Some(p) = self.path_in(src, main, 0) {
             return Some(p);
         }
@@ -1981,19 +2826,87 @@ impl<'d> Exporter<'d> {
         Some(p)
     }
 
-    /// The id path of layer `s` inside component `comp`: `s` itself, or through the nested
-    /// instance it is expanded in, then on inside that instance's main.
+    /// The id path of layer `s` inside component `comp`. Context copies keep their scalar
+    /// values; only this address follows their explicit source links into the required main.
     fn path_in(&self, s: NodeId, comp: NodeId, depth: usize) -> Option<Vec<NodeId>> {
-        if depth > 32 {
+        fn parents(doc: &Document, id: NodeId) -> Option<Vec<NodeId>> {
+            let mut up = Vec::new();
+            let mut seen = std::collections::BTreeSet::from([id]);
+            let mut current = doc.node(id)?.parent;
+            // Native page/component containers sit above the format's 256-layer budget.
+            for _ in 0..512 {
+                let Some(id) = current else { return Some(up) };
+                if !seen.insert(id) {
+                    return None;
+                }
+                up.push(id);
+                current = doc.node(id)?.parent;
+            }
+            None
+        }
+
+        if depth > 32 || !matches!(self.doc.node(comp)?.kind, NodeKind::Component { .. }) {
             return None;
         }
         let doc = self.doc;
-        let up = doc.ancestors(s);
+        let mut current = s;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut address = None;
+        // Validate the entire chain, even after finding an address in the requested main.
+        let (s, up) = loop {
+            if depth.checked_add(seen.len())? > 32 || !seen.insert(current) {
+                return None;
+            }
+            let node = doc.node(current)?;
+            let up = parents(doc, current)?;
+            let next = match node.source {
+                None => None,
+                Some(source) if matches!(&node.kind, NodeKind::Instance { component, .. } if source == *component) => {
+                    // A root marker names the instance's main, never a layer within that main.
+                    if !matches!(doc.node(source)?.kind, NodeKind::Component { .. }) || parents(doc, source)?.contains(&current) {
+                        return None;
+                    }
+                    None
+                }
+                Some(source) => {
+                    let target = doc.node(source)?;
+                    let target_up = parents(doc, source)?;
+                    if source == current || target_up.contains(&current) {
+                        return None;
+                    }
+                    let owner = up.iter().find_map(|id| doc.node(*id).filter(|n| matches!(n.kind, NodeKind::Instance { .. })))?;
+                    let NodeKind::Instance { component: main, .. } = &owner.kind else {
+                        return None;
+                    };
+                    if !matches!(doc.node(*main)?.kind, NodeKind::Component { .. }) {
+                        return None;
+                    }
+                    let in_main = source != *main && target_up.contains(main);
+                    let source_owner = owner.source.and_then(|id| doc.node(id)).filter(|n| {
+                        matches!(&n.kind, NodeKind::Instance { component, .. } if component == main)
+                            && target_up.iter().find(|id| doc.node(**id).is_some_and(|n| matches!(n.kind, NodeKind::Instance { .. }))) == Some(&n.id)
+                    });
+                    if !in_main && source_owner.is_none() {
+                        return None;
+                    }
+                    let parent = doc.node(node.parent?)?;
+                    let expected_parent = if parent.id == owner.id { if in_main { *main } else { source_owner?.id } } else { parent.source? };
+                    if target.parent != Some(expected_parent) {
+                        return None;
+                    }
+                    Some(source)
+                }
+            };
+            if address.is_none() && up.contains(&comp) {
+                address = Some((current, up));
+            }
+            match next {
+                Some(source) => current = source,
+                None => break address?,
+            }
+        };
         let below: Vec<NodeId> = up.iter().take_while(|a| **a != comp).copied().collect();
-        if below.len() == up.len() {
-            return None;
-        }
-        // The outermost nested instance between the component and the layer.
+        // The outermost nested instance between the component and the addressed layer.
         match below.iter().rev().find_map(|a| match doc.node(*a).map(|n| &n.kind) {
             Some(NodeKind::Instance { component, .. }) => Some((*a, *component)),
             _ => None,
@@ -2001,10 +2914,41 @@ impl<'d> Exporter<'d> {
             None => Some(vec![s]),
             Some((inst, main)) => {
                 let mut p = vec![inst];
-                p.extend(self.path_in(doc.node(s)?.source?, main, depth + 1)?);
+                p.extend(self.path_in(self.layer_source(doc.node(s)?, 0)?, main, depth + 1)?);
                 Some(p)
             }
         }
+    }
+
+    /// An imported, renamed nested instance can lose its outer source link. Recover only an
+    /// unambiguous single-child slot; its own component link is a root marker, not a layer link.
+    fn layer_source(&self, layer: &Node, depth: usize) -> Option<NodeId> {
+        if depth > 32 {
+            return None;
+        }
+        let doc = self.doc;
+        let unplaced = matches!(&layer.kind, NodeKind::Instance { component, .. } if layer.source == Some(*component));
+        if !unplaced && let Some(source) = layer.source.filter(|id| doc.contains(*id)) {
+            return Some(source);
+        }
+        let parent = doc.node(layer.parent?)?;
+        let source_parent = match &parent.kind {
+            NodeKind::Instance { component, .. } => doc.node(*component).filter(|n| matches!(n.kind, NodeKind::Component { .. }))?,
+            _ => doc.node(self.layer_source(parent, depth + 1)?).filter(|n| n.kind.type_name() == parent.kind.type_name())?,
+        };
+        if parent.children.len() != 1
+            || parent.children[0] != layer.id
+            || source_parent.children.len() != 1
+            || parent.layout.as_ref().map(|l| l.mode) != source_parent.layout.as_ref().map(|l| l.mode)
+            || parent.prop_refs.contains_key("slot")
+            || source_parent.prop_refs.contains_key("slot")
+            || parent.overrides.contains("slot")
+            || source_parent.overrides.contains("slot")
+        {
+            return None;
+        }
+        let source = doc.node(source_parent.children[0])?;
+        (layer.kind.type_name() == source.kind.type_name()).then_some(source.id)
     }
 
     /// Interactions, scrolling, flow starts and the overlay settings this layer is opened with.
@@ -2349,6 +3293,7 @@ fn unset(key: &str) -> Option<Kv<'static>> {
         }
         "variableConsumptionMap" | "variableModeBySetMap" => o(vec![("entries", arr(Vec::new()))]),
         "mask" | "rectangleCornerRadiiIndependent" | "borderStrokeWeightsIndependent" => b(false),
+        "maskType" => e("ALPHA"),
         "effects" | "dashPattern" | "layoutGrids" | "exportSettings" | "prototypeInteractions" | "fillGeometry" | "variableWidthPoints" => {
             arr(Vec::new())
         }
@@ -2360,6 +3305,7 @@ fn unset(key: &str) -> Option<Kv<'static>> {
         "scrollDirection" => e("NONE"),
         "scrollBehavior" => e("SCROLLS"),
         "parameterConsumptionMap" => o(vec![("entries", arr(Vec::new()))]),
+        "componentPropAssignments" | "pluginData" => arr(Vec::new()),
         "textTruncation" => e("DISABLED"),
         "hyperlink" => o(vec![("url", s(""))]),
         _ => return None,
@@ -2389,6 +3335,28 @@ fn key_codes(key: &str) -> Option<(Vec<i64>, bool)> {
 }
 
 /// The text style fields of a layer or of an override table entry.
+/// Whether text style `a` shows the typography a reader takes from linked style `b` over the
+/// layer's own (font, size, line height and letter spacing).
+fn same_typography(a: &TextStyle, b: &TextStyle, bound: impl Fn(&str) -> bool) -> bool {
+    (bound("fontFamily") || a.font_family == b.font_family)
+        && (bound("fontStyle") || super::style_name(&a.font_style) == super::style_name(&b.font_style))
+        && (bound("fontSize") || a.font_size == b.font_size)
+        && (bound("lineHeight") || a.line_height == b.line_height)
+        // Pixels and percent of the same size space alike (0 px is 0 %).
+        && (bound("letterSpacing") || {
+            // A bound size also changes percent spacing in the layer's modes.
+            let size = if bound("fontSize") { a.font_size } else { b.font_size };
+            let (x, y) = (a.letter_spacing.resolve(a.font_size), b.letter_spacing.resolve(size));
+            (x - y).abs() <= 1e-6 * x.abs().max(y.abs()).max(1.0)
+        })
+}
+
+/// Whether run style `st` has no link while the text's `base` style has one (its override entry
+/// then has to clear the link it would otherwise take from the base).
+fn unlinks(st: &TextStyle, base: &TextStyle) -> bool {
+    st.link.is_none() && base.link.is_some()
+}
+
 fn style_fields(st: &TextStyle, f: &mut Fields) {
     let line_height = match st.line_height {
         // Percent units count from the font's own line height (100 % is "auto"); a share of the
@@ -2470,3 +3438,33 @@ fn export_setting(x: &figcraft_doc::ExportSetting) -> Kv<'static> {
     };
     o(vec![("suffix", s(&x.suffix)), ("imageType", e(format)), ("constraint", o(vec![("type", e(ty)), ("value", fl(value))]))])
 }
+
+#[cfg(test)]
+#[path = "export_stage_b_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod stage_b_tests;
+
+#[cfg(test)]
+#[path = "export_child_layout_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod child_layout_tests;
+
+#[cfg(test)]
+#[path = "export_text_run_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod text_run_tests;
+
+#[cfg(test)]
+#[path = "export_blur_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod blur_tests;
+
+#[cfg(test)]
+#[path = "export_mask_type_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod mask_type_tests;
+
+#[cfg(test)]
+#[path = "export_compare_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod compare_tests;

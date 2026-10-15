@@ -84,6 +84,17 @@ shapes, text, gradients, masks and effects; `info` lists what it left out as `no
 `.png/.jpg/.webp` (the current page rendered at 1x with its background), `.pdf` (the current page's
 frames, one page each), `.fig` (the whole file, experimental, as `export --format fig`).
 
+### `import-figma <Figma-Design-URL> -o <out.figcraft>`
+
+Download a whole Design file through Figma's public REST API and save a new native document.
+The personal access token comes from `FIGCRAFT_FIGMA_TOKEN` in the process environment, with
+`file_content:read`; never pass it as an argument. Prints source file key/version, counts and
+compatibility notes as JSON. Images and local variables are best effort. An existing file at the
+`-o` path is replaced without asking. This requires native CLI, creates a local snapshot and does
+not sync back. It shares the transport checked with synthetic HTTP responses and a live desktop
+PAT import; direct live CLI token authentication remains unverified. See
+[Figma import](figma-import.md#validation-and-limits).
+
 ### `render <file> -o <out.png> [--scale N] [--page NAME]`
 
 The whole page (default the first) with its background, as png, jpg or webp. Large pages are scaled

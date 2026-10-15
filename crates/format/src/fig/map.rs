@@ -6,7 +6,7 @@
 //! are expanded here from the main component (overrides and derived layout matched by id path,
 //! component property values applied) so the import looks as saved.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use figcraft_doc::geom::{Affine, Point};
@@ -27,10 +27,13 @@ const MAX_COMMANDS: usize = 200_000;
 const NO_STYLE: &str = "4294967295:4294967295";
 
 /// The REST API file JSON for message `msg`, with the warnings about what was skipped.
-pub(super) fn to_rest(msg: &Kv, name: &str) -> (Value, Vec<String>) {
+pub(super) fn to_rest(msg: &Kv, name: &str) -> Result<(Value, Vec<String>), crate::FormatError> {
     let mut m = Mapper::new(msg);
     let doc = m.document();
     let mut out = json!({"name": name, "document": doc});
+    if !m.library_contexts.is_empty() {
+        out[crate::rest::FIG_LIBRARY_CONTEXTS_FIELD] = Value::Array(std::mem::take(&mut m.library_contexts));
+    }
     if !m.styles.is_empty() {
         out["styles"] = Value::Object(std::mem::take(&mut m.styles));
     }
@@ -47,7 +50,9 @@ pub(super) fn to_rest(msg: &Kv, name: &str) -> (Value, Vec<String>) {
     if !styles.is_empty() {
         out["styleDefinitions"] = Value::Array(styles);
     }
-    (out, m.warnings)
+    m.properties.finish(&mut out);
+    m.warnings.extend(m.properties.warnings);
+    Ok((out, m.warnings))
 }
 
 /// REST importer warnings reworded for a `.fig` import (`None`: drop it).
@@ -72,9 +77,28 @@ fn guid(v: &Kv) -> Option<String> {
     Some(format!("{}:{}", num(v, "sessionID")? as u64, num(v, "localID")? as u64))
 }
 
+fn normalize_override_segment(path: &mut [String], index: usize, scope: &OverrideScope) {
+    let Some(segment) = path.get(index) else { return };
+    if scope.current.contains(segment) {
+        return;
+    }
+    if let Some(Some(current)) = scope.aliases.get(segment) {
+        path[index] = current.clone();
+    }
+}
+
 /// A `GUID`-holding reference (`StyleId`, `VariableID`, …): its `guid`.
 fn ref_guid(v: &Kv) -> Option<String> {
     v.get("guid").and_then(guid).filter(|g| g != NO_STYLE)
+}
+
+/// The style a layer links in `key`, or in the older `legacy` field when `key` names none. An
+/// explicit NO_STYLE in `key` is a detach and wins over the legacy field.
+fn style_link(v: &View, key: &str, legacy: &str) -> Option<String> {
+    match v.get(key).and_then(|r| r.get("guid")).and_then(guid) {
+        Some(id) => Some(id).filter(|g| g != NO_STYLE),
+        None => v.get(legacy).and_then(guid).filter(|g| g != NO_STYLE),
+    }
 }
 
 fn color(c: &Kv) -> Value {
@@ -126,6 +150,16 @@ impl<'a> View<'a> {
         v
     }
 
+    /// This view with `style` just above the node itself: the style beats the node's own copy of
+    /// its fields (stale when the style changed since), and override rows beat both.
+    fn styled(&self, style: Option<&'a Kv<'a>>) -> Self {
+        let mut v = self.clone();
+        if let Some(s) = style {
+            v.layers.insert(v.layers.len().min(1), s);
+        }
+        v
+    }
+
     fn get(&self, k: &str) -> Option<&'a Kv<'a>> {
         self.layers.iter().rev().find_map(|l| l.get(k))
     }
@@ -153,10 +187,22 @@ impl<'a> View<'a> {
 struct Inst<'a> {
     root: String,
     path: Vec<String>,
-    overrides: Rc<BTreeMap<Vec<String>, Vec<&'a Kv<'a>>>>,
+    overrides: Rc<BTreeMap<Vec<String>, Vec<OverrideRow<'a>>>>,
     props: Rc<BTreeMap<String, &'a Kv<'a>>>,
     /// Mains being expanded (an instance inside its own main stops there).
     symbols: Vec<String>,
+}
+
+#[derive(Clone)]
+struct OverrideRow<'a> {
+    row: &'a Kv<'a>,
+    source_depth: usize,
+    ordinal: usize,
+}
+
+struct OverrideScope {
+    current: BTreeSet<String>,
+    aliases: BTreeMap<String, Option<String>>,
 }
 
 struct Mapper<'a> {
@@ -165,10 +211,17 @@ struct Mapper<'a> {
     blobs: Vec<&'a [u8]>,
     /// Component property definitions: id → (REST name "Name#id", type).
     prop_defs: BTreeMap<String, (String, &'a str)>,
+    properties: property_capture::Capture<'a>,
     styles: Obj,
     /// Descriptions of components and component sets (REST `components` / `componentSets`).
     components: Obj,
     sets: Obj,
+    /// Component-bearing branches from private .fig internal canvases.
+    library_contexts: Vec<Value>,
+    library_scan_count: usize,
+    library_scan_limited: bool,
+    override_scopes: BTreeMap<String, Rc<OverrideScope>>,
+    override_scope_entries: usize,
     warnings: Vec<String>,
     count: usize,
 }
@@ -178,9 +231,19 @@ impl<'a> Mapper<'a> {
         let mut nodes = BTreeMap::new();
         let mut kids: BTreeMap<String, Vec<(&'a str, String)>> = BTreeMap::new();
         let mut prop_defs = BTreeMap::new();
-        for n in msg.get("nodeChanges").map(Kv::list).unwrap_or_default() {
+        let changes = msg.get("nodeChanges").map(Kv::list).unwrap_or_default();
+        // The last change of a GUID wins; a REMOVED change deletes what came before it.
+        for n in changes {
             let Some(id) = n.get("guid").and_then(guid) else { continue };
             if n.get("phase").and_then(Kv::str) == Some("REMOVED") {
+                nodes.remove(&id);
+            } else {
+                nodes.insert(id, n);
+            }
+        }
+        for n in changes {
+            let Some(id) = n.get("guid").and_then(guid) else { continue };
+            if !nodes.get(&id).is_some_and(|latest| std::ptr::eq(*latest, n)) {
                 continue;
             }
             if let Some(p) = n.get("parentIndex")
@@ -195,7 +258,6 @@ impl<'a> Mapper<'a> {
                     prop_defs.insert(did.clone(), (format!("{name}#{did}"), ty));
                 }
             }
-            nodes.insert(id, n);
         }
         for list in kids.values_mut() {
             list.sort();
@@ -203,7 +265,23 @@ impl<'a> Mapper<'a> {
         }
         let blobs =
             msg.get("blobs").map(Kv::list).unwrap_or_default().iter().map(|b| b.get("bytes").and_then(Kv::bytes).unwrap_or_default()).collect();
-        Self { nodes, kids, blobs, prop_defs, styles: Obj::new(), components: Obj::new(), sets: Obj::new(), warnings: Vec::new(), count: 0 }
+        Self {
+            nodes,
+            kids,
+            blobs,
+            prop_defs,
+            properties: property_capture::Capture::new(msg),
+            styles: Obj::new(),
+            components: Obj::new(),
+            sets: Obj::new(),
+            library_contexts: Vec::new(),
+            library_scan_count: 0,
+            library_scan_limited: false,
+            override_scopes: BTreeMap::new(),
+            override_scope_entries: 0,
+            warnings: Vec::new(),
+            count: 0,
+        }
     }
 
     fn warn(&mut self, w: impl Into<String>) {
@@ -217,6 +295,67 @@ impl<'a> Mapper<'a> {
         self.kids.get(id).map(|k| k.iter().map(|(_, c)| c.clone()).collect()).unwrap_or_default()
     }
 
+    fn override_scope(&mut self, main: &str) -> Rc<OverrideScope> {
+        if let Some(scope) = self.override_scopes.get(main) {
+            return Rc::clone(scope);
+        }
+        let mut current = BTreeSet::new();
+        let mut aliases: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut visited = BTreeSet::new();
+        let roots = self.kids.get(main).map_or(&[][..], Vec::as_slice);
+        let mut pending: Vec<(String, usize)> = Vec::new();
+        let mut complete = roots.len() <= MAX_NODES;
+        if complete {
+            pending.extend(roots.iter().map(|(_, id)| (id.clone(), 1)));
+        }
+        while let Some((id, depth)) = pending.pop() {
+            if depth > MAX_DEPTH {
+                complete = false;
+                break;
+            }
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if visited.len() > MAX_NODES {
+                complete = false;
+                break;
+            }
+            let Some(node) = self.nodes.get(&id) else { continue };
+            current.insert(id.clone());
+            if let Some(alias) = node.get("overrideKey").and_then(guid) {
+                match aliases.entry(alias) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(id.clone()));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if entry.get().as_deref().is_some_and(|target| target != id) {
+                            entry.insert(None);
+                        }
+                    }
+                }
+            }
+            if node.get("type").and_then(Kv::str) == Some("INSTANCE") {
+                continue;
+            }
+            let children = self.kids.get(&id).map_or(&[][..], Vec::as_slice);
+            if pending.len().saturating_add(visited.len()).saturating_add(children.len()) > MAX_NODES {
+                complete = false;
+                break;
+            }
+            pending.extend(children.iter().map(|(_, child)| (child.clone(), depth + 1)));
+        }
+        if !complete {
+            aliases.clear();
+        }
+        let scope = Rc::new(OverrideScope { current, aliases });
+        let cost = scope.current.len().saturating_add(scope.aliases.len());
+        if cost <= MAX_NODES.saturating_sub(self.override_scope_entries) {
+            self.override_scope_entries += cost;
+            self.override_scopes.insert(main.to_string(), Rc::clone(&scope));
+        }
+        scope
+    }
+
     /// The DOCUMENT with its pages.
     fn document(&mut self) -> Value {
         let doc_id = self.nodes.iter().find(|(_, n)| n.get("type").and_then(Kv::str) == Some("DOCUMENT")).map(|(id, _)| id.clone());
@@ -225,6 +364,8 @@ impl<'a> Mapper<'a> {
             None => self.nodes.iter().filter(|(_, n)| n.get("type").and_then(Kv::str) == Some("CANVAS")).map(|(id, _)| id.clone()).collect(),
         };
         let mut out = Vec::new();
+        let mut internal = Vec::new();
+        let mut visible_pages = Vec::new();
         for p in pages {
             let Some(&n) = self.nodes.get(&p) else { continue };
             if n.get("type").and_then(Kv::str) != Some("CANVAS") {
@@ -233,9 +374,17 @@ impl<'a> Mapper<'a> {
             }
             // The hidden page that holds styles, variables and library copies.
             if n.get("internalOnly").and_then(Kv::bool) == Some(true) {
+                internal.push((p, n));
                 continue;
             }
+            visible_pages.push(p.clone());
             out.push(self.page(&p, n));
+        }
+        let required_mains = self.referenced_component_mains(&visible_pages);
+        for (id, canvas) in internal {
+            if let Some(context) = self.library_context(&id, canvas, &required_mains) {
+                self.library_contexts.push(context);
+            }
         }
         if out.is_empty() {
             self.warn("the file has no pages");
@@ -243,11 +392,289 @@ impl<'a> Mapper<'a> {
         json!({"id": doc_id.unwrap_or_else(|| "0:0".into()), "type": "DOCUMENT", "children": out})
     }
 
+    /// Keep only component definitions and the containers needed to preserve their source paths.
+    fn referenced_component_mains(&mut self, visible_pages: &[String]) -> BTreeSet<String> {
+        let mut mains = BTreeSet::new();
+        let mut pending = Vec::new();
+        for page in visible_pages {
+            for id in self.children(page) {
+                if pending.len() >= MAX_NODES {
+                    break;
+                }
+                pending.push((id, 1));
+            }
+            if pending.len() >= MAX_NODES {
+                break;
+            }
+        }
+        if pending.len() >= MAX_NODES {
+            self.warn(format!("visible component reference scan reached the {MAX_NODES}-layer limit"));
+        }
+        let mut visited = BTreeSet::new();
+        let mut reference_limited = false;
+        while let Some((id, depth)) = pending.pop() {
+            if depth > MAX_DEPTH {
+                self.warn(format!("component references below {MAX_DEPTH} visible-layer levels were skipped"));
+                continue;
+            }
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if visited.len() > MAX_NODES {
+                self.warn(format!("visible component reference scan reached the {MAX_NODES}-layer limit"));
+                break;
+            }
+            let Some(node) = self.nodes.get(&id) else { continue };
+            let targets = self.component_main_targets(node);
+            self.add_component_targets(&mut mains, targets, &mut reference_limited);
+            let children = self.children(&id);
+            if pending.len().saturating_add(visited.len()).saturating_add(children.len()) > MAX_NODES {
+                if !reference_limited {
+                    self.warn(format!("visible component reference scan reached the {MAX_NODES}-layer limit"));
+                    reference_limited = true;
+                }
+                break;
+            }
+            pending.extend(children.into_iter().map(|child| (child, depth + 1)));
+        }
+
+        // Resolve nested mains only from definitions already reachable from visible instances.
+        let mut scanned_mains = BTreeSet::new();
+        let mut scanned_layers = visited;
+        let mut pending_mains: Vec<String> = mains.iter().cloned().collect();
+        'dependencies: while let Some(main) = pending_mains.pop() {
+            if !scanned_mains.insert(main.clone()) {
+                continue;
+            }
+            if scanned_mains.len() > MAX_NODES {
+                self.warn(format!("component dependency scan reached the {MAX_NODES}-main limit"));
+                break;
+            }
+            let mut layers = vec![(main.clone(), 0usize)];
+            let mut layer_seen = BTreeSet::new();
+            while let Some((id, depth)) = layers.pop() {
+                if depth > MAX_DEPTH {
+                    self.warn(format!("component dependencies deeper than {MAX_DEPTH} layers were skipped"));
+                    continue;
+                }
+                if !layer_seen.insert(id.clone()) {
+                    continue;
+                }
+                if !scanned_layers.insert(id.clone()) {
+                    continue;
+                }
+                if scanned_layers.len() > MAX_NODES {
+                    self.warn(format!("component dependency traversal reached the {MAX_NODES}-layer limit"));
+                    break 'dependencies;
+                }
+                let Some(node) = self.nodes.get(&id) else { continue };
+                let targets = self.component_main_targets(node);
+                let children = self.children(&id);
+                let dependencies = self.add_component_targets(&mut mains, targets, &mut reference_limited);
+                pending_mains.extend(dependencies);
+                if layers.len().saturating_add(scanned_layers.len()).saturating_add(children.len()) > MAX_NODES {
+                    self.warn(format!("component dependency traversal reached the {MAX_NODES}-layer limit"));
+                    break 'dependencies;
+                }
+                layers.extend(children.into_iter().map(|child| (child, depth + 1)));
+            }
+        }
+        mains
+    }
+
+    fn add_component_targets(&mut self, mains: &mut BTreeSet<String>, targets: Vec<String>, limited: &mut bool) -> Vec<String> {
+        let mut added = Vec::new();
+        for target in targets {
+            if mains.contains(&target) {
+                continue;
+            }
+            if mains.len() >= MAX_NODES {
+                if !*limited {
+                    self.warn(format!("component reference scan reached the {MAX_NODES}-main limit"));
+                    *limited = true;
+                }
+                break;
+            }
+            mains.insert(target.clone());
+            added.push(target);
+        }
+        added
+    }
+
+    fn instance_main_targets(&self, node: &Kv<'a>) -> Vec<String> {
+        if node.get("type").and_then(Kv::str) != Some("INSTANCE") {
+            return Vec::new();
+        }
+        let mut targets = Vec::new();
+        if let Some(main) = node.get("overriddenSymbolID").and_then(guid) {
+            targets.push(main);
+        }
+        if let Some(main) = node.get("symbolData").and_then(|data| data.get("symbolID")).and_then(guid) {
+            targets.push(main);
+        }
+        targets.extend(self.instance_swap_targets(node.get("componentPropAssignments").map(Kv::list).unwrap_or_default()));
+        let mut pending: Vec<(&Kv<'a>, usize)> = [
+            node.get("symbolData").and_then(|data| data.get("symbolOverrides")).map(Kv::list).unwrap_or_default(),
+            node.get("derivedSymbolData").map(Kv::list).unwrap_or_default(),
+        ]
+        .into_iter()
+        .flat_map(|rows| rows.iter().map(|row| (row, 1)))
+        .take(MAX_NODES)
+        .collect();
+        let mut visited = 0usize;
+        while let Some((row, depth)) = pending.pop() {
+            if depth > MAX_DEPTH || visited >= MAX_NODES {
+                break;
+            }
+            visited += 1;
+            if let Some(main) = row.get("overriddenSymbolID").and_then(guid) {
+                targets.push(main);
+            }
+            if let Some(main) = row.get("symbolData").and_then(|data| data.get("symbolID")).and_then(guid) {
+                targets.push(main);
+            }
+            targets.extend(self.instance_swap_targets(row.get("componentPropAssignments").map(Kv::list).unwrap_or_default()));
+            let nested: Vec<_> = [
+                row.get("symbolData").and_then(|data| data.get("symbolOverrides")).map(Kv::list).unwrap_or_default(),
+                row.get("derivedSymbolData").map(Kv::list).unwrap_or_default(),
+            ]
+            .into_iter()
+            .flat_map(|rows| rows.iter().map(|row| (row, depth + 1)))
+            .take(MAX_NODES.saturating_sub(pending.len()))
+            .collect();
+            pending.extend(nested);
+        }
+        targets
+    }
+
+    fn component_main_targets(&self, node: &Kv<'a>) -> Vec<String> {
+        let mut targets = self.instance_main_targets(node);
+        targets.extend(node.get("componentPropDefs").map(Kv::list).unwrap_or_default().iter().filter_map(|definition| {
+            let (_, "INSTANCE_SWAP") = definition.get("id").and_then(guid).and_then(|def| self.prop_defs.get(&def).cloned())? else {
+                return None;
+            };
+            definition.get("initialValue").and_then(|value| value.get("guidValue")).and_then(guid)
+        }));
+        targets
+    }
+
+    fn instance_swap_targets(&self, assignments: &[Kv<'a>]) -> Vec<String> {
+        assignments
+            .iter()
+            .filter_map(|assignment| {
+                let (_, "INSTANCE_SWAP") = assignment.get("defID").and_then(guid).and_then(|def| self.prop_defs.get(&def).cloned())? else {
+                    return None;
+                };
+                assignment.get("value").and_then(|value| value.get("guidValue")).and_then(guid)
+            })
+            .collect()
+    }
+
+    fn library_context(&mut self, id: &str, canvas: &'a Kv<'a>, required_mains: &BTreeSet<String>) -> Option<Value> {
+        if self.library_scan_count >= MAX_NODES {
+            if !self.library_scan_limited {
+                self.warn(format!("internal library traversal reached the {MAX_NODES}-layer limit; remaining branches were skipped"));
+                self.library_scan_limited = true;
+            }
+            return None;
+        }
+        let mut included = BTreeSet::new();
+        let mut parents = BTreeMap::from([(id.to_string(), None::<String>)]);
+        let mut pending: Vec<(String, usize, bool)> = self.children(id).into_iter().map(|child| (child, 1, false)).collect();
+        let mut visited = BTreeSet::new();
+        while let Some((node_id, depth, in_definition)) = pending.pop() {
+            if depth > MAX_DEPTH {
+                self.warn(format!("internal library branches deeper than {MAX_DEPTH} levels were skipped"));
+                continue;
+            }
+            if !visited.insert(node_id.clone()) {
+                let mut ancestry = BTreeSet::new();
+                let mut ancestor = Some(node_id.clone());
+                while let Some(parent) = ancestor {
+                    if !ancestry.insert(parent.clone()) {
+                        self.warn("cyclic parent links in internal library branches were truncated");
+                        break;
+                    }
+                    if ancestry.len() > MAX_DEPTH {
+                        break;
+                    }
+                    ancestor = parents.get(&parent).cloned().flatten();
+                }
+                continue;
+            }
+            self.library_scan_count += 1;
+            if self.library_scan_count > MAX_NODES {
+                if !self.library_scan_limited {
+                    self.warn(format!("internal library traversal reached the {MAX_NODES}-layer limit; remaining branches were skipped"));
+                    self.library_scan_limited = true;
+                }
+                break;
+            }
+            if visited.len() > MAX_NODES {
+                self.warn(format!("the file has more than {MAX_NODES} internal library layers; the rest were skipped"));
+                break;
+            }
+            let Some(node) = self.nodes.get(&node_id) else { continue };
+            let kind = node.get("type").and_then(Kv::str);
+            let definition = (kind == Some("SYMBOL") || (kind == Some("FRAME") && node.get("isStateGroup").and_then(Kv::bool) == Some(true)))
+                && required_mains.contains(&node_id);
+            let in_definition = in_definition || definition;
+            if in_definition {
+                included.insert(node_id.clone());
+            }
+            if definition {
+                let mut ancestor = parents.get(&node_id).cloned().flatten();
+                let mut ancestor_seen = BTreeSet::new();
+                let mut ancestor_depth = 0;
+                while let Some(parent) = ancestor {
+                    if !ancestor_seen.insert(parent.clone()) {
+                        self.warn("cyclic parent links in internal library branches were truncated");
+                        break;
+                    }
+                    if ancestor_depth >= MAX_DEPTH {
+                        self.warn(format!("internal library ancestry deeper than {MAX_DEPTH} levels was truncated"));
+                        break;
+                    }
+                    ancestor_depth += 1;
+                    included.insert(parent.clone());
+                    ancestor = parents.get(&parent).cloned().flatten();
+                }
+            }
+            for child in self.children(&node_id).into_iter().rev() {
+                parents.insert(child.clone(), Some(node_id.clone()));
+                pending.push((child, depth + 1, in_definition));
+            }
+        }
+        if included.is_empty() {
+            return None;
+        }
+
+        let mut context = Obj::new();
+        context.insert("id".into(), json!(id));
+        context.insert("type".into(), json!("FRAME"));
+        copy_str(&mut context, &View::of(canvas), "name", "name");
+        context.insert("size".into(), json!({"x": 0.0, "y": 0.0}));
+        context.insert("relativeTransform".into(), rows(Affine::IDENTITY));
+        context.insert(crate::rest::FIG_SOURCE_FIELD.into(), json!({"origin": id, "expanded": false, "wireFrame": true, "wireInstance": false}));
+        self.variable_bindings(&mut context, &View::of(canvas));
+        let mut children = Vec::new();
+        for child in self.children(id) {
+            if let Some(mapped) = self.layer_filtered(&child, None, Affine::IDENTITY, None, 0, Some(&included)) {
+                children.push(mapped);
+            }
+        }
+        if !children.is_empty() {
+            context.insert("children".into(), Value::Array(children));
+        }
+        Some(Value::Object(context))
+    }
+
     fn page(&mut self, id: &str, n: &'a Kv<'a>) -> Value {
         let v = View::of(n);
         let mut o = Obj::new();
         o.insert("id".into(), json!(id));
         o.insert("type".into(), json!("CANVAS"));
+        self.properties.packet(&mut o, &v);
         copy_str(&mut o, &v, "name", "name");
         if let Some(c) = v.get("backgroundColor") {
             o.insert("backgroundColor".into(), color(c));
@@ -277,6 +704,21 @@ impl<'a> Mapper<'a> {
     /// parent's coordinates to the enclosing frame's (groups and booleans place their children in
     /// the frame's space, like the REST JSON). `parent`: the parent's view (grid tracks).
     fn layer(&mut self, id: &str, inst: Option<&Inst<'a>>, space: Affine, parent: Option<&View<'a>>, depth: usize) -> Option<Value> {
+        self.layer_filtered(id, inst, space, parent, depth, None)
+    }
+
+    fn layer_filtered(
+        &mut self,
+        id: &str,
+        inst: Option<&Inst<'a>>,
+        space: Affine,
+        parent: Option<&View<'a>>,
+        depth: usize,
+        included: Option<&BTreeSet<String>>,
+    ) -> Option<Value> {
+        if included.is_some_and(|ids| !ids.contains(id)) {
+            return None;
+        }
         if depth > MAX_DEPTH {
             self.warn(format!("layers nested deeper than {MAX_DEPTH} levels were skipped"));
             return None;
@@ -288,7 +730,7 @@ impl<'a> Mapper<'a> {
         let base = *self.nodes.get(id)?;
         let path = inst.map(|i| [i.path.as_slice(), &[id.to_string()]].concat());
         let view = match (inst, &path) {
-            (Some(i), Some(p)) => View::of(base).with(i.overrides.get(p).into_iter().flatten().copied()),
+            (Some(i), Some(p)) => View::of(base).with(i.overrides.get(p).into_iter().flatten().map(|row| row.row)),
             _ => View::of(base),
         };
         let rest_id = match (inst, &path) {
@@ -311,7 +753,13 @@ impl<'a> Mapper<'a> {
         self.count += 1;
         let mut o = Obj::new();
         o.insert("id".into(), json!(rest_id));
+        // Private provenance for the .fig importer; ordinary REST import ignores it.
+        o.insert(
+            crate::rest::FIG_SOURCE_FIELD.into(),
+            json!({"origin": id, "expanded": inst.is_some(), "wireFrame": own == "FRAME", "wireInstance": own == "INSTANCE"}),
+        );
         o.insert("type".into(), json!(ty));
+        self.properties.packet(&mut o, &view);
         copy_str(&mut o, &view, "name", "name");
         self.common(&mut o, &view, ty, space, parent);
         match ty {
@@ -347,12 +795,13 @@ impl<'a> Mapper<'a> {
         if ty == "INSTANCE" {
             if let Some((sub, sym)) = self.instance(&mut o, &view, id, inst, &rest_id) {
                 for c in self.children(&sym) {
-                    kids.extend(self.layer(&c, Some(&sub), child_space, Some(&view), depth + 1));
+                    // The source branch can live outside this physical cache context.
+                    kids.extend(self.layer_filtered(&c, Some(&sub), child_space, Some(&view), depth + 1, None));
                 }
             }
         } else {
             for c in self.children(id) {
-                kids.extend(self.layer(&c, inst, child_space, Some(&view), depth + 1));
+                kids.extend(self.layer_filtered(&c, inst, child_space, Some(&view), depth + 1, included));
             }
         }
         if stand.is_some_and(|s| s.0 == "FRAME") {
@@ -564,7 +1013,7 @@ impl<'a> Mapper<'a> {
     /// The style node a layer links in `key` (or the older `legacy` field), recorded for the REST
     /// `styles` map under `slot`.
     fn style(&mut self, v: &View<'a>, key: &str, legacy: &str, slot: &str, out: &mut Obj) -> Option<&'a Kv<'a>> {
-        let id = v.get(key).and_then(ref_guid).or_else(|| v.get(legacy).and_then(guid).filter(|g| g != NO_STYLE))?;
+        let id = style_link(v, key, legacy)?;
         let node = *self.nodes.get(&id)?;
         node.get("styleType").and_then(Kv::str)?;
         out.insert(slot.into(), json!(id));
@@ -636,18 +1085,26 @@ impl<'a> Mapper<'a> {
     }
 
     fn text(&mut self, o: &mut Obj, v: &View<'a>) {
-        let style_node = v
-            .get("styleIdForText")
-            .and_then(ref_guid)
-            .or_else(|| v.get("inheritTextStyleID").and_then(guid))
-            .and_then(|s| self.nodes.get(&s).copied());
-        let sv = v.with(style_node.filter(|s| s.get("styleType").and_then(Kv::str) == Some("TEXT")));
+        let style_node = style_link(v, "styleIdForText", "inheritTextStyleID").and_then(|s| self.nodes.get(&s).copied());
+        // Instance overrides beat the shared style; the style beats the layer's own copy.
+        let sv = v.styled(style_node.filter(|s| s.get("styleType").and_then(Kv::str) == Some("TEXT")));
         let td = v.get("textData");
         let chars = td.and_then(|t| t.get("characters")).and_then(Kv::str).unwrap_or("");
         o.insert("characters".into(), json!(chars));
         let mut style = text_style(&sv, None);
+        // Decoration can be overridden locally while keeping the shared style's typography.
+        if let Some(decoration @ ("NONE" | "UNDERLINE" | "STRIKETHROUGH")) = v.str("textDecoration") {
+            style.insert("textDecoration".into(), json!(decoration));
+        }
+        if let Some(case @ ("ORIGINAL" | "UPPER" | "LOWER" | "TITLE" | "SMALL_CAPS" | "SMALL_CAPS_FORCED")) = v.str("textCase") {
+            style.insert("textCase".into(), json!(case));
+        }
         for k in ["textAlignHorizontal", "textAlignVertical", "textAutoResize", "textTruncation"] {
             copy_str(&mut style, v, k, k);
+        }
+        // Paragraph settings belong to the effective text layer, including explicit zero clears.
+        for k in ["paragraphSpacing", "paragraphIndent"] {
+            copy_num(&mut style, v, k, k);
         }
         if let Some(n) = v.num("maxLines").filter(|n| *n >= 1.0) {
             style.insert("maxLines".into(), json!(n));
@@ -658,20 +1115,7 @@ impl<'a> Mapper<'a> {
         }
         o.insert("style".into(), Value::Object(style));
         let Some(td) = td else { return };
-        let ids: Vec<u64> = td.get("characterStyleIDs").map(Kv::list).unwrap_or_default().iter().filter_map(Kv::f64).map(|i| i as u64).collect();
-        if ids.iter().any(|i| *i != 0) {
-            let mut table = Obj::new();
-            for e in td.get("styleOverrideTable").map(Kv::list).unwrap_or_default() {
-                let Some(sid) = num(e, "styleID") else { continue };
-                let mut s = text_style(&View::of(e), size);
-                if let Some(fills) = e.get("fillPaints") {
-                    s.insert("fills".into(), Value::Array(fills.list().iter().filter_map(paint).collect()));
-                }
-                table.insert((sid as u64).to_string(), Value::Object(s));
-            }
-            o.insert("characterStyleOverrides".into(), json!(ids));
-            o.insert("styleOverrideTable".into(), Value::Object(table));
-        }
+        char_styles(o, td, size);
         let lines: Vec<&str> = td
             .get("lines")
             .map(Kv::list)
@@ -725,10 +1169,13 @@ impl<'a> Mapper<'a> {
     fn network(&mut self, o: &mut Obj, v: &View<'a>) -> bool {
         let Some(vd) = v.get("vectorData") else { return false };
         let Some(blob) = num(vd, "vectorNetworkBlob").and_then(|i| self.blobs.get(i as usize)).copied() else { return false };
-        let Some(net) = network::decode(blob) else {
+        let Some((net, styled_segments)) = network::decode_styled(blob) else {
             self.warn("damaged vector networks import as outlines");
             return false;
         };
+        if styled_segments > 0 {
+            self.warn("stroke styles of single vector network segments were left out");
+        }
         // An open path shows its fill, which regions can't hold: the outline keeps the look.
         let fills_shown =
             o.get("fills").and_then(Value::as_array).is_some_and(|f| f.iter().any(|p| p.get("visible").and_then(Value::as_bool) != Some(false)));
@@ -855,6 +1302,16 @@ impl<'a> Mapper<'a> {
                 "characters" => {
                     if let Some(t) = prop_text(val) {
                         o.insert("characters".into(), json!(t));
+                        // Run styles count the chars they were made for: for other chars only
+                        // the value's own apply.
+                        if own_text(v) != Some(t) {
+                            o.remove("characterStyleOverrides");
+                            o.remove("styleOverrideTable");
+                            if let Some(tv) = val.get("textValue") {
+                                let size = o.get("style").and_then(|s| s.get("fontSize")).and_then(Value::as_f64);
+                                char_styles(o, tv, size);
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -908,23 +1365,41 @@ impl<'a> Mapper<'a> {
         }
         // Overrides by id path below this instance (the instance itself is addressed by its main's id).
         let own_path: Vec<String> = outer.map(|i| [i.path.as_slice(), &[id.to_string()]].concat()).unwrap_or_default();
-        let mut overrides: BTreeMap<Vec<String>, Vec<&'a Kv<'a>>> = outer.map(|i| (*i.overrides).clone()).unwrap_or_default();
+        let scope = self.override_scope(&sym);
+        let mut overrides: BTreeMap<Vec<String>, Vec<OverrideRow<'a>>> = BTreeMap::new();
+        if let Some(inherited) = outer {
+            for (path, rows) in inherited.overrides.iter() {
+                let mut path = path.clone();
+                if path.starts_with(&own_path) && path.len() > own_path.len() {
+                    normalize_override_segment(&mut path, own_path.len(), &scope);
+                }
+                overrides.entry(path).or_default().extend(rows.iter().cloned());
+            }
+        }
+        let mut local: BTreeMap<Vec<String>, Vec<OverrideRow<'a>>> = BTreeMap::new();
         let lists = [sd.and_then(|s| s.get("symbolOverrides")).map(Kv::list).unwrap_or_default(), v.list("derivedSymbolData")];
-        for (layer, list) in lists.into_iter().enumerate() {
+        let source_depth = outer.map_or(0, |i| i.symbols.len());
+        let mut ordinal = 0;
+        for list in lists {
             for ov in list {
+                let row_ordinal = ordinal;
+                ordinal += 1;
                 let rel: Vec<String> =
                     ov.get("guidPath").and_then(|g| g.get("guids")).map(Kv::list).unwrap_or_default().iter().filter_map(guid).collect();
                 if rel.is_empty() || rel == [sym.clone()] {
                     continue;
                 }
-                let e = overrides.entry([own_path.as_slice(), &rel].concat()).or_default();
-                // The outer instance's overrides win over this one's own; derived layout comes last.
-                if layer == 0 && outer.is_some() {
-                    e.insert(0, ov);
-                } else {
-                    e.push(ov);
-                }
+                let mut rel = rel;
+                normalize_override_segment(&mut rel, 0, &scope);
+                local.entry([own_path.as_slice(), &rel].concat()).or_default().push(OverrideRow { row: ov, source_depth, ordinal: row_ordinal });
             }
+        }
+        for (path, rows) in local {
+            overrides.entry(path).or_default().extend(rows);
+        }
+        for rows in overrides.values_mut() {
+            // Deeper source rows apply first; outer rows win, with wire order preserved per source.
+            rows.sort_by_key(|row| (std::cmp::Reverse(row.source_depth), row.ordinal));
         }
         let mut all_props: BTreeMap<String, &'a Kv<'a>> = outer.map(|i| (*i.props).clone()).unwrap_or_default();
         for a in assignments {
@@ -1511,6 +1986,26 @@ fn variable_value(d: &Kv) -> Option<Value> {
     v.get("textValue").and_then(Kv::str).map(|s| json!(s))
 }
 
+/// Per-character styles of text data `td` (`characterStyleIDs` + `styleOverrideTable`) as REST
+/// `characterStyleOverrides` + `styleOverrideTable`; `size`: the base font size.
+fn char_styles(o: &mut Obj, td: &Kv, size: Option<f64>) {
+    let ids: Vec<u64> = td.get("characterStyleIDs").map(Kv::list).unwrap_or_default().iter().filter_map(Kv::f64).map(|i| i as u64).collect();
+    if ids.iter().all(|i| *i == 0) {
+        return;
+    }
+    let mut table = Obj::new();
+    for e in td.get("styleOverrideTable").map(Kv::list).unwrap_or_default() {
+        let Some(sid) = num(e, "styleID") else { continue };
+        let mut s = text_style(&View::of(e), size);
+        if let Some(fills) = e.get("fillPaints") {
+            s.insert("fills".into(), Value::Array(fills.list().iter().filter_map(paint).collect()));
+        }
+        table.insert((sid as u64).to_string(), Value::Object(s));
+    }
+    o.insert("characterStyleOverrides".into(), json!(ids));
+    o.insert("styleOverrideTable".into(), Value::Object(table));
+}
+
 /// The text of a component property value.
 fn prop_text<'k>(v: &'k Kv) -> Option<&'k str> {
     v.get("textValue").and_then(|t| t.get("characters")).and_then(Kv::str)
@@ -1548,7 +2043,11 @@ fn text_style(v: &View, size: Option<f64>) -> Obj {
         let val = num(ls, "value").unwrap_or(0.0);
         let px = match ls.get("units").and_then(Kv::str) {
             Some("PIXELS") => val,
-            Some("PERCENT") => val / 100.0 * font_size,
+            Some("PERCENT") => {
+                // Private (read by `rest/text.rs`): REST spacing is in pixels; keep the percent.
+                s.insert("_letterSpacingPercent".into(), json!(val));
+                val / 100.0 * font_size
+            }
             _ => val * font_size,
         };
         s.insert("letterSpacing".into(), json!(px));
@@ -1576,8 +2075,17 @@ fn text_style(v: &View, size: Option<f64>) -> Obj {
             }
         }
     }
-    if let Some(u) = v.get("hyperlink").and_then(|h| h.get("url")).and_then(Kv::str).filter(|u| !u.is_empty()) {
-        s.insert("hyperlink".into(), json!({"type": "URL", "url": u}));
+    if let Some(h) = v.get("hyperlink") {
+        match h.get("url").and_then(Kv::str) {
+            Some(u) if !u.is_empty() => {
+                s.insert("hyperlink".into(), json!({"type": "URL", "url": u}));
+            }
+            // An empty URL clears a link the entry would otherwise take from the base.
+            Some(_) => {
+                s.insert("hyperlink".into(), Value::Null);
+            }
+            None => {}
+        }
     }
     s
 }
@@ -1757,4 +2265,1150 @@ fn svg_path(b: &[u8]) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Resource provenance is separate from the component model: no defaults are added to mains.
+/// The records are private: an inconsistent, stale or oversized one is left out with one counted
+/// warning per kind and never makes the whole file fail to open.
+mod property_capture {
+    use super::super::property_resources as r;
+    use super::{Kv, Obj, View};
+    use crate::FormatError;
+    use r::{
+        Binding, Bindings, Catalog, DROPPED_DAMAGED, DROPPED_LIMIT, DROPPED_STALE, DROPPED_UNBOUND, Definition, Id, MainTag, NativePacket, Owner,
+        Role, WirePacket, WireResources,
+    };
+    use serde_json::{Value, json};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const DROPPED_DEFINITION: &str = "hidden Boolean property definition(s) with inconsistent or malformed declarations were not retained";
+    /// Expanded instance copies repeat their source's packet. Distinct packets share
+    /// [`r::MAX_TOTAL_BYTES`]; the copies together are bounded by this.
+    const MAX_COPIED_BYTES: usize = 8 * r::MAX_TOTAL_BYTES;
+
+    pub(super) struct Capture<'a> {
+        nodes: BTreeMap<Id, &'a Kv<'a>>,
+        pub(super) warnings: Vec<String>,
+        dropped: BTreeMap<&'static str, usize>,
+        /// Distinct source packets by address and length: `Some(carries a catalog)` when valid.
+        sources: BTreeMap<(usize, usize), Option<bool>>,
+        bytes: usize,
+        copied: usize,
+    }
+
+    #[derive(Clone)]
+    struct Pending {
+        node: String,
+        main: Id,
+        visible_main: Option<Id>,
+        values: Vec<Binding>,
+        visible: Option<Binding>,
+    }
+
+    impl<'a> Capture<'a> {
+        pub fn new(msg: &'a Kv<'a>) -> Self {
+            let mut nodes = BTreeMap::new();
+            // As in the mapper: the last change of a GUID wins; a REMOVED change deletes it.
+            for n in msg.get("nodeChanges").map(Kv::list).unwrap_or_default() {
+                let Some(id) = n.get("guid").and_then(r::id) else { continue };
+                if n.get("phase").and_then(Kv::str) == Some("REMOVED") {
+                    nodes.remove(&id);
+                } else {
+                    nodes.insert(id, n);
+                }
+            }
+            Self { nodes, warnings: Vec::new(), dropped: BTreeMap::new(), sources: BTreeMap::new(), bytes: 0, copied: 0 }
+        }
+
+        fn left_out(&mut self, kind: &'static str, count: usize) {
+            if count > 0 {
+                *self.dropped.entry(kind).or_default() += count;
+            }
+        }
+
+        fn charge(&mut self, size: usize) -> Result<(), FormatError> {
+            let total = self.bytes.checked_add(size).ok_or_else(|| r::invalid("input byte count overflow"))?;
+            if total > r::MAX_TOTAL_BYTES {
+                return Err(r::invalid("input metadata exceeds its total byte limit"));
+            }
+            self.bytes = total;
+            Ok(())
+        }
+
+        pub fn packet(&mut self, out: &mut Obj, view: &View<'a>) {
+            let mut found = None;
+            let mut ambiguous = false;
+            // The effective list is deliberate: an explicit empty list clears inherited data.
+            for p in view.list("pluginData") {
+                if p.get("pluginID").and_then(Kv::str) != Some(r::PLUGIN_ID) || p.get("key").and_then(Kv::str) != Some(r::PLUGIN_KEY) {
+                    continue;
+                }
+                match p.get("value").and_then(Kv::str) {
+                    Some(value) if found.is_none() => found = Some(value),
+                    _ => ambiguous = true,
+                }
+            }
+            if ambiguous {
+                // A duplicate or non-text packet: none of this layer's packets is trusted.
+                self.left_out(DROPPED_DAMAGED, 1);
+                return;
+            }
+            let Some(value) = found else { return };
+            // Expanded copies inherit their source's packet: validate and charge it once.
+            let source = (value.as_ptr() as usize, value.len());
+            let catalog = match self.sources.get(&source) {
+                Some(state) => *state,
+                None => {
+                    let state = if self.charge(value.len()).is_err() {
+                        self.left_out(DROPPED_LIMIT, 1);
+                        None
+                    } else if let Ok(packet) = r::read_wire(value) {
+                        Some(packet.native.catalog.is_some())
+                    } else {
+                        self.left_out(DROPPED_DAMAGED, 1);
+                        None
+                    };
+                    self.sources.insert(source, state);
+                    state
+                }
+            };
+            let Some(catalog) = catalog else { return };
+            if catalog && out.get("type").and_then(Value::as_str) != Some("CANVAS") {
+                // A catalog packet is carried by a page only.
+                self.left_out(DROPPED_DAMAGED, 1);
+                return;
+            }
+            match self.copied.checked_add(value.len()).filter(|n| *n <= MAX_COPIED_BYTES) {
+                Some(total) => self.copied = total,
+                None => {
+                    self.left_out(DROPPED_LIMIT, 1);
+                    return;
+                }
+            }
+            out.insert(r::FIG_PACKET_FIELD.into(), Value::String(value.to_string()));
+        }
+
+        /// Check the private records against the mapped file and leave out what does not hold.
+        /// Never fails: a problem with the records as a whole leaves all of them out.
+        pub fn finish(&mut self, out: &mut Value) {
+            if let Err(error) = self.finish_inner(out) {
+                strip_all(out);
+                let reason = match &error {
+                    FormatError::Io(reason) | FormatError::Corrupt(reason) => reason.trim_start_matches(".fig property resources: ").to_string(),
+                    other => other.to_string(),
+                };
+                self.warnings.push(format!("all private Boolean property records were left out ({reason})"));
+            }
+            let dropped = r::dropped_warnings(&self.dropped);
+            self.warnings.extend(dropped);
+        }
+
+        fn finish_inner(&mut self, out: &mut Value) -> Result<(), FormatError> {
+            let root = out.get("document").ok_or_else(|| r::invalid("missing mapped document"))?;
+            let mut components = BTreeMap::new();
+            let mut ambiguous = BTreeSet::new();
+            let mut visible = BTreeSet::new();
+            let mut packets = Vec::new();
+            index(root, None, &mut components, &mut ambiguous, &mut visible, &mut packets, 0)?;
+            // An actual main id that names two components cannot anchor provenance.
+            components.retain(|id, _| !ambiguous.contains(id));
+            if !packets.is_empty() {
+                let parsed: Vec<(&Value, Option<WirePacket>)> = packets.iter().map(|(node, raw)| (*node, r::read_wire(raw).ok())).collect();
+                let (kept, catalogs, reverse) = self.check_written(&parsed, &ambiguous, &visible);
+                let packets: Vec<Option<WirePacket>> = parsed.into_iter().zip(kept).map(|((_, packet), keep)| packet.filter(|_| keep)).collect();
+                let root = out.get_mut("document").ok_or_else(|| r::invalid("missing mapped document"))?;
+                let mut walk = Walk { packets: &packets, next: 0, reverse: &reverse, catalogs: &catalogs, unbound: 0 };
+                walk.apply(root, 0)?;
+                let unbound = walk.unbound;
+                self.left_out(DROPPED_UNBOUND, unbound);
+                let mut strings = Vec::new();
+                for c in catalogs.values() {
+                    let value = r::write_catalog(c)?;
+                    self.charge(value.len())?;
+                    strings.push(Value::String(value));
+                }
+                if !strings.is_empty() {
+                    out[r::FIG_CATALOGS_FIELD] = Value::Array(strings);
+                }
+                return Ok(());
+            }
+
+            let mut pending = Vec::new();
+            let mut needed = BTreeSet::new();
+            let mut budget = Budget::default();
+            // Discover IDs without copying property keys. Only retained definitions are materialized.
+            collect(root, None, &components, &mut pending, &mut needed, None, &mut budget, 0)?;
+            self.left_out(DROPPED_LIMIT, std::mem::take(&mut budget.over));
+            if needed.is_empty() {
+                return Ok(());
+            }
+            let Some(catalog) = self.retained_catalog(&needed) else {
+                return Ok(());
+            };
+            let names: BTreeMap<_, _> = catalog.owners.iter().flat_map(|o| &o.definitions).map(|d| (d.id, d.name.as_str())).collect();
+            let defined: BTreeSet<_> = names.keys().copied().collect();
+            budget.bytes = self.bytes;
+            collect(root, None, &components, &mut pending, &mut needed, Some(&defined), &mut budget, 0)?;
+            self.left_out(DROPPED_LIMIT, budget.over);
+            let mut node_packets = BTreeMap::new();
+            let mut ambiguous_carriers = BTreeSet::new();
+            let mut mains = BTreeSet::new();
+            let mut count = 0usize;
+            for mut p in pending {
+                p.values.retain(|b| defined.contains(&b.definition));
+                p.visible = p.visible.filter(|b| defined.contains(&b.definition));
+                if p.values.is_empty() && p.visible.is_none() {
+                    continue;
+                }
+                if p.values.is_empty()
+                    && let Some(main) = p.visible_main
+                {
+                    p.main = main;
+                }
+                if p.visible.is_none() || p.visible_main == Some(p.main) {
+                    p.visible_main = None;
+                }
+                // The effective property name must be the retained definition's.
+                if p.values
+                    .iter()
+                    .chain(p.visible.iter())
+                    .any(|b| names.get(&b.definition).is_none_or(|name| b.key != format!("{name}#{}", b.definition.key())))
+                {
+                    self.left_out(DROPPED_DAMAGED, 1);
+                    continue;
+                }
+                match count.checked_add(p.values.len() + usize::from(p.visible.is_some())).filter(|n| *n <= r::MAX_BINDINGS) {
+                    Some(total) => count = total,
+                    None => {
+                        self.left_out(DROPPED_LIMIT, 1);
+                        continue;
+                    }
+                }
+                if ambiguous_carriers.contains(&p.node) {
+                    self.left_out(DROPPED_DAMAGED, 1);
+                    continue;
+                }
+                p.values.sort_by(|a, b| a.key.cmp(&b.key));
+                mains.insert(p.main);
+                mains.extend(p.visible_main);
+                let packet = WirePacket {
+                    version: r::VERSION,
+                    native: NativePacket {
+                        catalog: None,
+                        main: None,
+                        bindings: Some(Bindings {
+                            version: r::VERSION,
+                            scope: catalog.scope.clone(),
+                            main: p.main,
+                            visible_main: p.visible_main,
+                            values: p.values,
+                            visible: p.visible,
+                        }),
+                    },
+                    resources: None,
+                    aliases: Vec::new(),
+                };
+                if node_packets.insert(p.node.clone(), packet).is_some() {
+                    // Two carriers share one id: neither can be told apart on import.
+                    node_packets.remove(&p.node);
+                    ambiguous_carriers.insert(p.node);
+                    self.left_out(DROPPED_DAMAGED, 2);
+                }
+            }
+            if node_packets.is_empty() {
+                return Ok(());
+            }
+            let string = r::write_catalog(&catalog)?;
+            if self.charge(string.len()).is_err() {
+                self.left_out(DROPPED_LIMIT, 1);
+                return Ok(());
+            }
+            let root = out.get_mut("document").ok_or_else(|| r::invalid("missing mapped document"))?;
+            attach(root, &catalog.scope, &mains, &mut node_packets, self, 0)?;
+            self.left_out(DROPPED_STALE, node_packets.len());
+            out[r::FIG_CATALOGS_FIELD] = json!([string]);
+            Ok(())
+        }
+
+        /// Which written packets hold (by index into `parsed`), the catalogs that remain, and
+        /// every wire definition id that a written catalog claims, with its scope.
+        fn check_written(
+            &mut self,
+            parsed: &[(&Value, Option<WirePacket>)],
+            ambiguous: &BTreeSet<Id>,
+            visible: &BTreeSet<Id>,
+        ) -> (Vec<bool>, BTreeMap<String, Catalog>, BTreeMap<Id, String>) {
+            let mut kept: Vec<bool> = parsed.iter().map(|(_, packet)| packet.is_some()).collect();
+            self.left_out(DROPPED_DAMAGED, kept.iter().filter(|k| !**k).count());
+            // Wire ids of verified hidden definitions, kept or not: a field naming one needs an alias.
+            let mut reverse = BTreeMap::new();
+            let mut catalogs: BTreeMap<String, (Catalog, WireResources)> = BTreeMap::new();
+            let mut carriers: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+            let (mut owners, mut definitions, mut bindings) = (0usize, 0usize, 0usize);
+            for (i, (_, packet)) in parsed.iter().enumerate() {
+                let Some(packet) = packet else { continue };
+                let count = packet.native.bindings.as_ref().map_or(0, |b| b.values.len() + usize::from(b.visible.is_some()));
+                match bindings.checked_add(count).filter(|n| *n <= r::MAX_BINDINGS) {
+                    Some(total) => bindings = total,
+                    None => {
+                        kept[i] = false;
+                        self.left_out(DROPPED_LIMIT, 1);
+                        continue;
+                    }
+                }
+                let Some(catalog) = &packet.native.catalog else { continue };
+                let verified = packet.resources.as_ref().filter(|wire| self.validate_resources(catalog, wire, visible).is_ok());
+                if let Some(wire) = verified {
+                    for d in &wire.definitions {
+                        reverse.entry(d.wire).or_insert_with(|| wire.scope.clone());
+                    }
+                }
+                let problem = match verified {
+                    None => Some(DROPPED_DAMAGED),
+                    Some(wire) => match catalogs.get(&catalog.scope) {
+                        Some((previous, resources)) => (previous != catalog || resources != wire).then_some(DROPPED_DAMAGED),
+                        None => {
+                            let rows = catalog.owners.iter().map(|o| o.definitions.len()).sum::<usize>();
+                            if owners + catalog.owners.len() > r::MAX_OWNERS || definitions + rows > r::MAX_DEFINITIONS {
+                                Some(DROPPED_LIMIT)
+                            } else {
+                                owners += catalog.owners.len();
+                                definitions += rows;
+                                catalogs.insert(catalog.scope.clone(), (catalog.clone(), wire.clone()));
+                                None
+                            }
+                        }
+                    },
+                };
+                match problem {
+                    Some(kind) => {
+                        kept[i] = false;
+                        self.left_out(kind, 1);
+                    }
+                    None => carriers.entry(catalog.scope.clone()).or_default().push(i),
+                }
+            }
+            // A wire id claimed by two catalogs belongs to neither.
+            let mut allocated = BTreeSet::new();
+            let mut shared = Vec::new();
+            for (scope, (_, wire)) in &catalogs {
+                let ids: Vec<Id> = wire.owners.iter().map(|o| o.wire).chain(wire.definitions.iter().map(|d| d.wire)).collect();
+                if ids.iter().any(|id| allocated.contains(id)) {
+                    shared.push(scope.clone());
+                } else {
+                    allocated.extend(ids);
+                }
+            }
+            for scope in shared {
+                catalogs.remove(&scope);
+                for i in carriers.remove(&scope).unwrap_or_default() {
+                    if let Some(k) = kept.get_mut(i) {
+                        *k = false;
+                    }
+                    self.left_out(DROPPED_DAMAGED, 1);
+                }
+            }
+            let names: BTreeMap<&str, BTreeMap<Id, &str>> = catalogs
+                .iter()
+                .map(|(scope, (c, _))| (scope.as_str(), c.owners.iter().flat_map(|o| &o.definitions).map(|d| (d.id, d.name.as_str())).collect()))
+                .collect();
+            let remaps: BTreeMap<&str, BTreeMap<Id, Id>> =
+                catalogs.iter().map(|(scope, (_, w))| (scope.as_str(), w.definitions.iter().map(|d| (d.original, d.wire)).collect())).collect();
+            // Leaving out a catalog carrier can orphan other packets: repeat until nothing changes.
+            let mut live: BTreeSet<String> = catalogs.keys().cloned().collect();
+            loop {
+                let mut changed = false;
+                for (i, (node, packet)) in parsed.iter().enumerate() {
+                    let Some(packet) = packet.as_ref().filter(|_| kept.get(i).copied().unwrap_or(false)) else { continue };
+                    let Some(kind) = check_packet(node, packet, &live, &names, &remaps, ambiguous) else { continue };
+                    if let Some(k) = kept.get_mut(i) {
+                        *k = false;
+                    }
+                    self.left_out(kind, 1);
+                    changed = true;
+                    if let Some(scope) = packet.native.catalog.as_ref().map(|c| &c.scope)
+                        && let Some(list) = carriers.get_mut(scope)
+                    {
+                        list.retain(|j| *j != i);
+                        if list.is_empty() {
+                            live.remove(scope);
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            let catalogs = catalogs.into_iter().filter(|(scope, _)| live.contains(scope)).map(|(scope, (c, _))| (scope, c)).collect();
+            (kept, catalogs, reverse)
+        }
+
+        /// The catalog of the hidden definitions `needed` names, without any definition whose
+        /// declarations are malformed or disagree (no default or name is guessed).
+        fn retained_catalog(&mut self, needed: &BTreeSet<Id>) -> Option<Catalog> {
+            let mut owner_rows = Vec::new();
+            let mut bad = BTreeSet::new();
+            let mut seen_names: BTreeMap<Id, &str> = BTreeMap::new();
+            let mut damaged = 0;
+            for (id, node) in &self.nodes {
+                if node.get("type").and_then(Kv::str) != Some("SYMBOL") {
+                    continue;
+                }
+                let defs = node.get("componentPropDefs").map(Kv::list).unwrap_or_default();
+                if !defs.iter().any(|d| d.get("id").and_then(r::id).is_some_and(|d| needed.contains(&d))) {
+                    continue;
+                }
+                let page = match self.hidden_page(*id) {
+                    Ok(Some(page)) => page,
+                    Ok(None) => continue,
+                    Err(_) => {
+                        damaged += 1;
+                        continue;
+                    }
+                };
+                let Some(name) = node.get("name").and_then(Kv::str).filter(|name| bounded_name(name).is_ok()) else {
+                    damaged += 1;
+                    continue;
+                };
+                let mut selected = Vec::new();
+                let mut seen = BTreeSet::new();
+                for d in defs {
+                    let Some(definition) = d.get("id").and_then(r::id).filter(|d| needed.contains(d)) else {
+                        continue;
+                    };
+                    if d.get("isDeleted").and_then(Kv::bool) == Some(true) {
+                        continue;
+                    }
+                    let key = d.get("name").and_then(Kv::str).filter(|key| bounded_name(key).is_ok());
+                    let boolean = d.get("type").and_then(Kv::str) == Some("BOOL");
+                    let (Some(key), true, Ok(initial), true) = (key, boolean, initial(d), seen.insert(definition)) else {
+                        bad.insert(definition);
+                        continue;
+                    };
+                    if seen_names.insert(definition, key).is_some_and(|previous| previous != key) {
+                        bad.insert(definition);
+                    }
+                    selected.push(Definition { id: definition, name: key.to_string(), initial });
+                }
+                if !selected.is_empty() {
+                    owner_rows.push(Owner { id: *id, page, name: name.to_string(), definitions: selected });
+                }
+            }
+            self.left_out(DROPPED_DAMAGED, damaged);
+            self.left_out(DROPPED_DEFINITION, bad.len());
+            let mut kept = Vec::new();
+            let (mut rows, mut copied, mut over) = (0usize, 0usize, 0usize);
+            for mut owner in owner_rows {
+                owner.definitions.retain(|d| !bad.contains(&d.id));
+                if owner.definitions.is_empty() {
+                    continue;
+                }
+                let size = owner.name.len() + owner.definitions.iter().map(|d| d.name.len()).sum::<usize>();
+                if kept.len() >= r::MAX_OWNERS || rows + owner.definitions.len() > r::MAX_DEFINITIONS || copied + size > r::MAX_CATALOG_BYTES {
+                    over += 1;
+                    continue;
+                }
+                rows += owner.definitions.len();
+                copied += size;
+                kept.push(owner);
+            }
+            self.left_out(DROPPED_LIMIT, over);
+            if kept.is_empty() {
+                return None;
+            }
+            match r::make_catalog(kept) {
+                Ok(catalog) => Some(catalog),
+                Err(_) => {
+                    self.left_out(DROPPED_LIMIT, 1);
+                    None
+                }
+            }
+        }
+
+        fn hidden_page(&self, start: Id) -> Result<Option<Id>, FormatError> {
+            let mut current = start;
+            let mut seen = BTreeSet::new();
+            for _ in 0..r::MAX_CHAIN {
+                if !seen.insert(current) {
+                    return Err(r::invalid("retained owner parent cycle"));
+                }
+                let Some(n) = self.nodes.get(&current) else {
+                    return Ok(None);
+                };
+                if n.get("type").and_then(Kv::str) == Some("CANVAS") {
+                    return Ok((n.get("internalOnly").and_then(Kv::bool) == Some(true)).then_some(current));
+                }
+                let Some(parent) = n.get("parentIndex").and_then(|p| p.get("guid")).and_then(r::id) else {
+                    return Ok(None);
+                };
+                current = parent;
+            }
+            Err(r::invalid("retained owner ancestry exceeds its limit"))
+        }
+
+        fn validate_resources(&self, catalog: &Catalog, wire: &WireResources, visible: &BTreeSet<Id>) -> Result<(), FormatError> {
+            r::validate_catalog(catalog)?;
+            if wire.scope != catalog.scope {
+                return Err(r::invalid("resource scope disagrees with catalog"));
+            }
+            let page = self.nodes.get(&wire.page).ok_or_else(|| r::invalid("resource page is missing"))?;
+            if visible.contains(&wire.page)
+                || page.get("type").and_then(Kv::str) != Some("CANVAS")
+                || page.get("internalOnly").and_then(Kv::bool) != Some(true)
+            {
+                return Err(r::invalid("resource page is not an unambiguous hidden canvas"));
+            }
+            let definitions: BTreeMap<_, _> = wire.definitions.iter().map(|d| (d.original, d.wire)).collect();
+            let owners: BTreeMap<_, _> = wire.owners.iter().map(|o| (o.original, o.wire)).collect();
+            let expected: BTreeSet<_> = catalog.owners.iter().flat_map(|o| &o.definitions).map(|d| d.id).collect();
+            if owners.len() != catalog.owners.len()
+                || definitions.len() != expected.len()
+                || definitions.keys().copied().collect::<BTreeSet<_>>() != expected
+            {
+                return Err(r::invalid("resource remaps do not cover the catalog exactly"));
+            }
+            let mut ids = BTreeSet::from([wire.page]);
+            for id in owners.values().chain(definitions.values()) {
+                if !ids.insert(*id) || visible.contains(id) {
+                    return Err(r::invalid("resource id collision"));
+                }
+            }
+            for owner in &catalog.owners {
+                let mapped = owners.get(&owner.id).ok_or_else(|| r::invalid("missing owner remap"))?;
+                let node = self.nodes.get(mapped).ok_or_else(|| r::invalid("standard resource owner is missing"))?;
+                if node.get("type").and_then(Kv::str) != Some("SYMBOL")
+                    || node.get("name").and_then(Kv::str) != Some(owner.name.as_str())
+                    || node.get("parentIndex").and_then(|p| p.get("guid")).and_then(r::id) != Some(wire.page)
+                {
+                    return Err(r::invalid("standard resource owner does not match its hidden carrier"));
+                }
+                let actual = node.get("componentPropDefs").map(Kv::list).unwrap_or_default();
+                if actual.len() != owner.definitions.len() {
+                    return Err(r::invalid("standard owner definition count differs"));
+                }
+                let mut by_id = BTreeMap::new();
+                for d in actual {
+                    let id = d.get("id").and_then(r::id).ok_or_else(|| r::invalid("standard definition lacks its id"))?;
+                    if by_id.insert(id, d).is_some() {
+                        return Err(r::invalid("duplicate standard definition id"));
+                    }
+                }
+                for definition in &owner.definitions {
+                    let remapped = definitions.get(&definition.id).ok_or_else(|| r::invalid("missing definition remap"))?;
+                    let d = by_id.get(remapped).ok_or_else(|| r::invalid("standard Boolean definition is missing"))?;
+                    if d.get("type").and_then(Kv::str) != Some("BOOL")
+                        || d.get("isDeleted").and_then(Kv::bool) == Some(true)
+                        || d.get("name").and_then(Kv::str) != Some(definition.name.as_str())
+                        || initial(d)? != definition.initial
+                    {
+                        return Err(r::invalid("standard Boolean definition disagrees with original resource"));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Why a written packet does not hold against the mapped file, if it does not.
+    fn check_packet(
+        node: &Value,
+        packet: &WirePacket,
+        live: &BTreeSet<String>,
+        names: &BTreeMap<&str, BTreeMap<Id, &str>>,
+        remaps: &BTreeMap<&str, BTreeMap<Id, Id>>,
+        ambiguous: &BTreeSet<Id>,
+    ) -> Option<&'static str> {
+        if let Some(main) = &packet.native.main {
+            let component = node.get("type").and_then(Value::as_str) == Some("COMPONENT") && node_id(node).is_some_and(|id| !ambiguous.contains(&id));
+            if !component || !live.contains(&main.scope) {
+                // The main tag lacks its actual component or catalog.
+                return Some(DROPPED_STALE);
+            }
+        }
+        let Some(binding) = &packet.native.bindings else { return None };
+        let (true, Some(names), Some(remaps)) =
+            (live.contains(&binding.scope), names.get(binding.scope.as_str()), remaps.get(binding.scope.as_str()))
+        else {
+            // The bindings lack their catalog (e.g. its page was deleted).
+            return Some(DROPPED_STALE);
+        };
+        for alias in &packet.aliases {
+            let Some(name) = names.get(&alias.definition).filter(|_| remaps.get(&alias.definition).copied() == Some(alias.wire)) else {
+                return Some(DROPPED_DAMAGED);
+            };
+            let raw_key = format!("{name}#{}", alias.wire.key());
+            let holds = match alias.role {
+                Role::Value => {
+                    node.get("type").and_then(Value::as_str) == Some("INSTANCE")
+                        && node.get("componentProperties").and_then(|p| p.get(&raw_key)).is_some_and(|p| {
+                            p.get("type").and_then(Value::as_str) == Some("BOOLEAN") && p.get("value").is_some_and(Value::is_boolean)
+                        })
+                }
+                Role::Visible => {
+                    node.get("componentPropertyReferences").and_then(|p| p.get("visible")).and_then(Value::as_str) == Some(raw_key.as_str())
+                }
+            };
+            if !holds {
+                // The alias lacks its effective standard Boolean field (e.g. the assignment was
+                // removed in another editor and the packet stayed behind).
+                return Some(DROPPED_STALE);
+            }
+        }
+        None
+    }
+
+    /// The second pass over a file with written packets, in the same pre-order as [`index`].
+    struct Walk<'w> {
+        packets: &'w [Option<WirePacket>],
+        next: usize,
+        reverse: &'w BTreeMap<Id, String>,
+        catalogs: &'w BTreeMap<String, Catalog>,
+        unbound: usize,
+    }
+
+    impl Walk<'_> {
+        /// Remove the packets that do not hold, and the standard fields that name a written
+        /// resource definition without a kept alias (their provenance is gone).
+        fn apply(&mut self, node: &mut Value, depth: usize) -> Result<(), FormatError> {
+            if depth > super::MAX_DEPTH + 4 {
+                return Err(r::invalid("mapped resource tree exceeds its depth limit"));
+            }
+            let packets = self.packets;
+            let mut packet = None;
+            if node.get(r::FIG_PACKET_FIELD).and_then(Value::as_str).is_some() {
+                packet = packets.get(self.next).and_then(Option::as_ref);
+                self.next += 1;
+                if packet.is_none()
+                    && let Some(fields) = node.as_object_mut()
+                {
+                    fields.remove(r::FIG_PACKET_FIELD);
+                }
+            }
+            let aliases: BTreeSet<(Role, Id)> = packet.into_iter().flat_map(|p| &p.aliases).map(|a| (a.role, a.wire)).collect();
+            let scope = packet.and_then(|p| p.native.bindings.as_ref()).map(|b| b.scope.as_str());
+            let (reverse, catalogs) = (self.reverse, self.catalogs);
+            let holds = |role, key: &str| {
+                let Some(id) = key.rsplit_once('#').and_then(|(_, id)| Id::parse(id)) else {
+                    return true;
+                };
+                let Some(owner) = reverse.get(&id) else {
+                    return true;
+                };
+                catalogs.contains_key(owner) && aliases.contains(&(role, id)) && scope == Some(owner.as_str())
+            };
+            if let Some(props) = node.get_mut("componentProperties").and_then(Value::as_object_mut) {
+                let before = props.len();
+                props.retain(|key, p| {
+                    !(p.get("type").and_then(Value::as_str) == Some("BOOLEAN") && p.get("value").is_some_and(Value::is_boolean))
+                        || holds(Role::Value, key)
+                });
+                self.unbound += before - props.len();
+            }
+            if let Some(refs) = node.get_mut("componentPropertyReferences").and_then(Value::as_object_mut)
+                && refs.get("visible").and_then(Value::as_str).is_some_and(|key| !holds(Role::Visible, key))
+            {
+                refs.remove("visible");
+                self.unbound += 1;
+            }
+            if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+                for child in children {
+                    self.apply(child, depth + 1)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Remove every private record from the mapped file.
+    fn strip_all(out: &mut Value) {
+        if let Some(fields) = out.as_object_mut() {
+            fields.remove(r::FIG_CATALOGS_FIELD);
+        }
+        let mut stack: Vec<&mut Value> = out.get_mut("document").into_iter().collect();
+        while let Some(node) = stack.pop() {
+            let Some(fields) = node.as_object_mut() else { continue };
+            fields.remove(r::FIG_PACKET_FIELD);
+            if let Some(Value::Array(children)) = fields.get_mut("children") {
+                stack.extend(children.iter_mut());
+            }
+        }
+    }
+
+    fn initial(d: &Kv<'_>) -> Result<Option<bool>, FormatError> {
+        match d.get("initialValue") {
+            None => Ok(None),
+            Some(Kv::Object(fields)) if fields.len() == 1 && fields.first().is_some_and(|(key, _)| *key == "boolValue") => d
+                .get("initialValue")
+                .and_then(|v| v.get("boolValue"))
+                .and_then(Kv::bool)
+                .map(Some)
+                .ok_or_else(|| r::invalid("Boolean initialValue has a non-Boolean value")),
+            Some(_) => Err(r::invalid("present Boolean initialValue is malformed")),
+        }
+    }
+
+    fn bounded_name(name: &str) -> Result<(), FormatError> {
+        if name.is_empty() || name.len() > r::MAX_NAME_BYTES || name.contains('\0') {
+            return Err(r::invalid("resource name is invalid or oversized"));
+        }
+        Ok(())
+    }
+
+    fn node_id(node: &Value) -> Option<Id> {
+        node.get("id").and_then(Value::as_str).and_then(Id::parse)
+    }
+    fn fields(node: &Value) -> BTreeSet<&str> {
+        node.get("componentPropertyDefinitions")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .take(256)
+            .filter(|(_, d)| matches!(d.get("type").and_then(Value::as_str), Some("BOOLEAN" | "TEXT" | "INSTANCE_SWAP")))
+            .map(|(key, _)| key.as_str())
+            .collect()
+    }
+    fn index<'b>(
+        node: &'b Value,
+        set: Option<&'b Value>,
+        components: &mut BTreeMap<Id, BTreeSet<&'b str>>,
+        ambiguous: &mut BTreeSet<Id>,
+        visible: &mut BTreeSet<Id>,
+        packets: &mut Vec<(&'b Value, &'b str)>,
+        depth: usize,
+    ) -> Result<(), FormatError> {
+        if depth > super::MAX_DEPTH + 4 {
+            return Err(r::invalid("mapped resource tree exceeds its depth limit"));
+        }
+        if let Some(origin) = node
+            .get(crate::rest::FIG_SOURCE_FIELD)
+            .and_then(|v| v.get("origin"))
+            .and_then(Value::as_str)
+            .and_then(Id::parse)
+            .or_else(|| node_id(node))
+        {
+            visible.insert(origin);
+        }
+        let ty = node.get("type").and_then(Value::as_str);
+        if ty == Some("COMPONENT")
+            && let Some(id) = node_id(node)
+        {
+            let mut known = fields(node);
+            if let Some(set) = set {
+                known.extend(fields(set));
+            }
+            if components.insert(id, known).is_some() {
+                ambiguous.insert(id);
+            }
+        }
+        if let Some(raw) = node.get(r::FIG_PACKET_FIELD).and_then(Value::as_str) {
+            packets.push((node, raw));
+        }
+        let next = (ty == Some("COMPONENT_SET")).then_some(node);
+        for child in node.get("children").and_then(Value::as_array).into_iter().flatten() {
+            index(child, next, components, ambiguous, visible, packets, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    #[derive(Default)]
+    struct Budget {
+        count: usize,
+        bytes: usize,
+        /// Bindings and carriers left out for a limit.
+        over: usize,
+    }
+    impl Budget {
+        fn charge(&mut self, bytes: usize) -> bool {
+            match self.bytes.checked_add(bytes).filter(|n| *n <= r::MAX_TOTAL_BYTES) {
+                Some(total) => {
+                    self.bytes = total;
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+    /// The binding `key` names, if it is retained and fits the budget (else it is counted as
+    /// left out). Without `eligible`, only records the definition ids that are referenced.
+    fn binding(key: &str, eligible: Option<&BTreeSet<Id>>, needed: &mut BTreeSet<Id>, budget: &mut Budget) -> Option<Binding> {
+        let (_, id) = key.rsplit_once('#')?;
+        let definition = Id::parse(id)?;
+        let Some(eligible) = eligible else {
+            if needed.len() < r::MAX_DEFINITIONS {
+                needed.insert(definition);
+            } else if !needed.contains(&definition) {
+                budget.over += 1;
+            }
+            return None;
+        };
+        if !eligible.contains(&definition) {
+            return None;
+        }
+        // Six bytes per input byte bounds JSON escaping before copying; reserve packet overhead too.
+        let estimate = key.len().checked_mul(6).and_then(|n| n.checked_add(256));
+        if bounded_name(key).is_err() || budget.count >= r::MAX_BINDINGS || !estimate.is_some_and(|n| budget.charge(n)) {
+            budget.over += 1;
+            return None;
+        }
+        budget.count += 1;
+        Some(Binding { key: key.to_string(), definition })
+    }
+    fn collect(
+        node: &Value,
+        ancestor: Option<Id>,
+        components: &BTreeMap<Id, BTreeSet<&str>>,
+        pending: &mut Vec<Pending>,
+        needed: &mut BTreeSet<Id>,
+        eligible: Option<&BTreeSet<Id>>,
+        budget: &mut Budget,
+        depth: usize,
+    ) -> Result<(), FormatError> {
+        if depth > super::MAX_DEPTH + 4 {
+            return Err(r::invalid("mapped resource tree exceeds its depth limit"));
+        }
+        let ty = node.get("type").and_then(Value::as_str);
+        let own = if ty == Some("INSTANCE") {
+            node.get("componentId").and_then(Value::as_str).and_then(Id::parse)
+        } else if ty == Some("COMPONENT") {
+            node_id(node)
+        } else {
+            ancestor
+        };
+        let mut values = Vec::new();
+        if ty == Some("INSTANCE")
+            && let Some(main) = own.filter(|m| components.contains_key(m))
+        {
+            // The REST reader keeps 256 values per instance (and warns about the rest).
+            for (key, prop) in node.get("componentProperties").and_then(Value::as_object).into_iter().flatten().take(256) {
+                if prop.get("type").and_then(Value::as_str) == Some("BOOLEAN")
+                    && prop.get("value").is_some_and(Value::is_boolean)
+                    && !components.get(&main).is_some_and(|d| d.contains(key.as_str()))
+                    && let Some(b) = binding(key, eligible, needed, budget)
+                {
+                    values.push(b);
+                }
+            }
+        }
+        let visible_main = if ty == Some("COMPONENT") { own } else { ancestor };
+        let visible = if let Some(main) = visible_main.filter(|m| components.contains_key(m)) {
+            let key = node.get("componentPropertyReferences").and_then(|v| v.get("visible")).and_then(Value::as_str);
+            match key {
+                Some(key) if !components.get(&main).is_some_and(|d| d.contains(key)) => binding(key, eligible, needed, budget),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let main = if values.is_empty() { visible_main } else { own };
+        if let Some(main) = main
+            && (!values.is_empty() || visible.is_some())
+        {
+            let id = node.get("id").and_then(Value::as_str).filter(|id| id.len() <= (super::MAX_DEPTH + 2) * 24);
+            let estimate = id.and_then(|id| id.len().checked_mul(6)).and_then(|n| n.checked_add(256));
+            match id {
+                Some(id) if pending.len() < super::MAX_NODES && estimate.is_some_and(|n| budget.charge(n)) => {
+                    pending.push(Pending { node: id.to_string(), main, visible_main, values, visible });
+                }
+                _ => budget.over += 1,
+            }
+        }
+        let next = if matches!(ty, Some("INSTANCE" | "COMPONENT")) { own } else { ancestor };
+        for child in node.get("children").and_then(Value::as_array).into_iter().flatten() {
+            collect(child, next, components, pending, needed, eligible, budget, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn attach(
+        node: &mut Value,
+        scope: &str,
+        mains: &BTreeSet<Id>,
+        pending: &mut BTreeMap<String, WirePacket>,
+        capture: &mut Capture<'_>,
+        depth: usize,
+    ) -> Result<(), FormatError> {
+        if depth > super::MAX_DEPTH + 4 {
+            return Err(r::invalid("mapped resource tree exceeds its depth limit"));
+        }
+        let id = node.get("id").and_then(Value::as_str).map(str::to_string);
+        let mut packet = id.as_ref().and_then(|id| pending.remove(id));
+        if node.get("type").and_then(Value::as_str) == Some("COMPONENT")
+            && let Some(id) = node_id(node).filter(|id| mains.contains(id))
+        {
+            let p = packet.get_or_insert(WirePacket { version: r::VERSION, native: NativePacket::default(), resources: None, aliases: Vec::new() });
+            p.native.main = Some(MainTag { version: r::VERSION, scope: scope.to_string(), origin: id });
+        }
+        if let Some(packet) = packet {
+            match r::write_wire(&packet) {
+                Ok(value) if capture.charge(value.len()).is_ok() => node[r::FIG_PACKET_FIELD] = Value::String(value),
+                _ => capture.left_out(DROPPED_LIMIT, 1),
+            }
+        }
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+            for child in children {
+                attach(child, scope, mains, pending, capture, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    mod capture_tests {
+        use super::*;
+        fn gid(local: u32) -> Id {
+            Id { session: 9, local }
+        }
+        fn g(local: u32) -> Kv<'static> {
+            Kv::Object(vec![("sessionID", Kv::Uint(9)), ("localID", Kv::Uint(u64::from(local)))])
+        }
+        fn o(fields: Vec<(&'static str, Kv<'static>)>) -> Kv<'static> {
+            Kv::Object(fields)
+        }
+        fn node(local: u32, kind: &'static str, parent: Option<u32>, mut fields: Vec<(&'static str, Kv<'static>)>) -> Kv<'static> {
+            let mut all = vec![("guid", g(local)), ("type", Kv::Enum(kind)), ("name", Kv::Str("Synthetic".into()))];
+            if let Some(parent) = parent {
+                all.push(("parentIndex", o(vec![("guid", g(parent)), ("position", Kv::Str("!".into()))])));
+            }
+            all.append(&mut fields);
+            o(all)
+        }
+        fn visible() -> Kv<'static> {
+            o(vec![(
+                "entries",
+                Kv::Array(vec![o(vec![
+                    ("variableField", Kv::Enum("VISIBLE")),
+                    ("variableData", o(vec![("value", o(vec![("propRefValue", o(vec![("defId", g(70))]))]))])),
+                ])]),
+            )])
+        }
+        fn owner(initial: Option<Kv<'static>>, phase: &'static str) -> Kv<'static> {
+            let mut def = vec![("id", g(70)), ("name", Kv::Str("Toggle".into())), ("type", Kv::Enum("BOOL"))];
+            if let Some(initial) = initial {
+                def.push(("initialValue", initial));
+            }
+            node(50, "SYMBOL", Some(3), vec![("phase", Kv::Enum(phase)), ("componentPropDefs", Kv::Array(vec![o(def)]))])
+        }
+        fn message(initial: Option<Kv<'static>>, clear: bool, root_ref: bool) -> Kv<'static> {
+            let main = node(10, "SYMBOL", Some(2), if root_ref { vec![("parameterConsumptionMap", visible())] } else { vec![] });
+            let mut sd = vec![("symbolID", g(10))];
+            if clear {
+                sd.push((
+                    "symbolOverrides",
+                    Kv::Array(vec![o(vec![
+                        ("guidPath", o(vec![("guids", Kv::Array(vec![g(12)]))])),
+                        ("parameterConsumptionMap", o(vec![("entries", Kv::Array(vec![]))])),
+                    ])]),
+                ));
+            }
+            let used = node(
+                11,
+                "INSTANCE",
+                Some(2),
+                vec![
+                    ("symbolData", o(sd)),
+                    ("componentPropAssignments", Kv::Array(vec![o(vec![("defID", g(70)), ("value", o(vec![("boolValue", Kv::Bool(false))]))])])),
+                ],
+            );
+            o(vec![(
+                "nodeChanges",
+                Kv::Array(vec![
+                    node(1, "DOCUMENT", None, vec![]),
+                    node(2, "CANVAS", Some(1), vec![]),
+                    node(3, "CANVAS", Some(1), vec![("internalOnly", Kv::Bool(true))]),
+                    main,
+                    used,
+                    node(12, "FRAME", Some(10), vec![("parameterConsumptionMap", visible())]),
+                    owner(initial, "CREATED"),
+                ]),
+            )])
+        }
+        fn mapped(msg: &Kv<'_>) -> Value {
+            super::super::to_rest(msg, "Synthetic resources").unwrap().0
+        }
+        fn catalog(v: &Value) -> Catalog {
+            r::read_catalog(v[r::FIG_CATALOGS_FIELD][0].as_str().unwrap()).unwrap()
+        }
+        fn named_id<'b>(v: &'b Value, id: &str) -> Option<&'b Value> {
+            if v.get("id").and_then(Value::as_str) == Some(id) {
+                return Some(v);
+            }
+            v.get("children").and_then(Value::as_array).into_iter().flatten().find_map(|v| named_id(v, id))
+        }
+        fn changes<'a>(msg: &'a mut Kv<'static>) -> &'a mut Vec<Kv<'static>> {
+            let Kv::Object(fields) = msg else { panic!() };
+            let (_, Kv::Array(rows)) = fields.iter_mut().find(|(key, _)| *key == "nodeChanges").unwrap() else { panic!() };
+            rows
+        }
+        /// The private records are left out with a warning; the file still opens.
+        fn left_out(warnings: &[String], kind: &str) -> bool {
+            warnings.iter().any(|w| w.ends_with(kind))
+        }
+        #[test]
+        fn absent_default_is_retained_but_present_malformed_defaults_are_not() {
+            let v = mapped(&message(None, false, false));
+            assert_eq!(catalog(&v).owners[0].definitions[0].initial, None);
+            for bad in [
+                o(vec![]),
+                o(vec![("boolValue", Kv::Str("false".into()))]),
+                o(vec![("boolValue", Kv::Bool(false)), ("textValue", Kv::Str("other".into()))]),
+            ] {
+                // A malformed present default is neither retained nor guessed as absent.
+                let (v, warnings) = super::super::to_rest(&message(Some(bad), false, false), "Synthetic").unwrap();
+                assert!(v.get(r::FIG_CATALOGS_FIELD).is_none(), "a malformed default must not be retained");
+                assert!(left_out(&warnings, DROPPED_DEFINITION), "{warnings:?}");
+            }
+        }
+        #[test]
+        fn current_owner_snapshot_accepts_repeated_and_updated_history() {
+            let mut msg = message(Some(o(vec![("boolValue", Kv::Bool(false))])), false, false);
+            let first = catalog(&mapped(&msg));
+            changes(&mut msg).push(owner(Some(o(vec![("boolValue", Kv::Bool(false))])), "CREATED"));
+            assert_eq!(catalog(&mapped(&msg)), first);
+            changes(&mut msg).push(owner(Some(o(vec![("boolValue", Kv::Bool(true))])), "UPDATED"));
+            assert_eq!(catalog(&mapped(&msg)).owners[0].definitions[0].initial, Some(true));
+        }
+        #[test]
+        fn removed_owner_is_not_retained_as_the_catalog() {
+            let mut msg = message(Some(o(vec![("boolValue", Kv::Bool(false))])), false, false);
+            // The owner is removed and the definition moves to another hidden owner: only the
+            // live one may anchor the catalog, as in the mapper (last change wins; REMOVED deletes).
+            changes(&mut msg).push(owner(None, "REMOVED"));
+            let mut moved = owner(Some(o(vec![("boolValue", Kv::Bool(true))])), "CREATED");
+            let Kv::Object(fields) = &mut moved else { panic!() };
+            fields.iter_mut().find(|(key, _)| *key == "guid").unwrap().1 = g(51);
+            changes(&mut msg).push(moved);
+            let current = catalog(&mapped(&msg));
+            assert_eq!(current.owners.len(), 1, "{current:?}");
+            assert_eq!(current.owners[0].id, gid(51));
+            assert_eq!(current.owners[0].definitions[0].initial, Some(true));
+        }
+        #[test]
+        fn inconsistent_definitions_in_the_final_owner_are_not_retained() {
+            let mut msg = message(None, false, false);
+            let current = changes(&mut msg).last_mut().unwrap();
+            let Kv::Object(fields) = current else { panic!() };
+            let (_, Kv::Array(defs)) = fields.iter_mut().find(|(key, _)| *key == "componentPropDefs").unwrap() else { panic!() };
+            defs.push(defs[0].clone());
+            let (v, warnings) = super::super::to_rest(&msg, "Synthetic").unwrap();
+            assert!(v.get(r::FIG_CATALOGS_FIELD).is_none(), "an ambiguous declaration must not be retained");
+            assert!(named_id(&v["document"], "9:11").unwrap().get(r::FIG_PACKET_FIELD).is_none());
+            assert!(left_out(&warnings, DROPPED_DEFINITION), "{warnings:?}");
+        }
+        #[test]
+        fn expanded_visibility_inherits_and_explicit_empty_entries_clear_it() {
+            let kept = mapped(&message(None, false, false));
+            let child = named_id(&kept["document"], "I9:11;9:12").unwrap();
+            let packet = r::read_wire(child[r::FIG_PACKET_FIELD].as_str().unwrap()).unwrap();
+            assert_eq!(packet.native.bindings.unwrap().visible.unwrap().definition, gid(70));
+            let cleared = mapped(&message(None, true, false));
+            let child = named_id(&cleared["document"], "I9:11;9:12").unwrap();
+            assert!(child.get(r::FIG_PACKET_FIELD).is_none());
+            assert!(child.get("componentPropertyReferences").is_none());
+        }
+        #[test]
+        fn component_root_visibility_tags_its_actual_self_main() {
+            let v = mapped(&message(None, false, true));
+            let main = named_id(&v["document"], "9:10").unwrap();
+            let packet = r::read_wire(main[r::FIG_PACKET_FIELD].as_str().unwrap()).unwrap();
+            assert_eq!(packet.native.main.unwrap().origin, gid(10));
+            assert_eq!(packet.native.bindings.unwrap().main, gid(10));
+        }
+        #[test]
+        fn nested_value_and_visibility_keep_their_distinct_actual_mains() {
+            let mut msg = message(None, false, false);
+            changes(&mut msg).push(node(20, "SYMBOL", Some(2), vec![]));
+            changes(&mut msg).push(node(
+                21,
+                "INSTANCE",
+                Some(10),
+                vec![
+                    ("symbolData", o(vec![("symbolID", g(20))])),
+                    ("componentPropAssignments", Kv::Array(vec![o(vec![("defID", g(70)), ("value", o(vec![("boolValue", Kv::Bool(false))]))])])),
+                    ("parameterConsumptionMap", visible()),
+                ],
+            ));
+            let value = mapped(&msg);
+            for id in ["9:21", "I9:11;9:21"] {
+                let node = named_id(&value["document"], id).unwrap();
+                let packet = r::read_wire(node[r::FIG_PACKET_FIELD].as_str().unwrap()).unwrap();
+                let bindings = packet.native.bindings.unwrap();
+                assert_eq!(bindings.main, gid(20));
+                assert_eq!(bindings.visible_main, Some(gid(10)));
+                assert_eq!(bindings.values[0].definition, gid(70));
+                assert_eq!(bindings.visible.unwrap().definition, gid(70));
+            }
+            let (doc, _) = crate::rest::import_fig(&value, &|_| None).unwrap();
+            let dual: Vec<_> = doc
+                .nodes()
+                .filter_map(|n| n.plugin_data.get(r::BINDINGS_KEY))
+                .map(|s| r::read_bindings(s).unwrap())
+                .filter(|b| b.visible_main.is_some())
+                .collect();
+            assert_eq!(dual.len(), 2);
+            assert!(dual.iter().all(|b| b.main == gid(20) && b.visible_main == Some(gid(10))));
+        }
+        #[test]
+        fn retained_binding_budget_is_checked_before_copying_keys() {
+            let eligible = BTreeSet::from([gid(70)]);
+            let mut needed = BTreeSet::new();
+            let mut budget = Budget { count: r::MAX_BINDINGS, bytes: 0, over: 0 };
+            assert!(binding("Toggle#9:70", Some(&eligible), &mut needed, &mut budget).is_none());
+            assert_eq!((budget.count, budget.bytes, budget.over), (r::MAX_BINDINGS, 0, 1), "an over-limit binding is counted, not copied");
+            let mut budget = Budget { count: 0, bytes: r::MAX_TOTAL_BYTES, over: 0 };
+            assert!(binding("Toggle#9:70", Some(&eligible), &mut needed, &mut budget).is_none());
+            assert_eq!((budget.count, budget.bytes, budget.over), (0, r::MAX_TOTAL_BYTES, 1));
+            let mut budget = Budget::default();
+            assert!(binding("Unused#9:71", Some(&eligible), &mut needed, &mut budget).is_none());
+            assert_eq!((budget.count, budget.bytes, budget.over), (0, 0, 0));
+            assert!(binding("Toggle#9:70", Some(&eligible), &mut needed, &mut budget).is_some());
+            assert_eq!(budget.count, 1);
+        }
+        #[test]
+        fn missing_alias_for_an_active_standard_resource_field_drops_that_field() {
+            let value = mapped(&message(None, false, false));
+            let (doc, _) = crate::rest::import_fig(&value, &|_| None).unwrap();
+            let (bytes, _) = crate::fig::export(&doc, None).unwrap();
+            let archive = crate::fig::Archive::open(&bytes).unwrap();
+            let (schema, bytes) = crate::fig::decode_canvas(&archive.canvas).unwrap();
+            let root = schema.find("Message").unwrap();
+            let mut decoded = schema.decode_message(root, &bytes).unwrap();
+            let Kv::Object(fields) = &mut decoded else { panic!() };
+            let (_, Kv::Array(nodes)) = fields.iter_mut().find(|(key, _)| *key == "nodeChanges").unwrap() else { panic!() };
+            let mut changed = 0;
+            for node in nodes {
+                let Kv::Object(fields) = node else { continue };
+                let Some((_, Kv::Array(plugins))) = fields.iter_mut().find(|(key, _)| *key == "pluginData") else { continue };
+                for plugin in plugins {
+                    if plugin.get("pluginID").and_then(Kv::str) != Some(r::PLUGIN_ID) || plugin.get("key").and_then(Kv::str) != Some(r::PLUGIN_KEY) {
+                        continue;
+                    }
+                    let Kv::Object(fields) = plugin else { continue };
+                    let (_, Kv::Str(value)) = fields.iter_mut().find(|(key, _)| *key == "value").unwrap() else { panic!() };
+                    let mut packet = r::read_wire(value).unwrap();
+                    if packet.native.bindings.as_ref().is_some_and(|b| !b.values.is_empty()) {
+                        packet.aliases.clear();
+                        *value = r::write_wire(&packet).unwrap();
+                        changed += 1;
+                    }
+                }
+            }
+            assert!(changed > 0, "a real written packet must have been mutated");
+            let (v, warnings) = super::super::to_rest(&decoded, "Synthetic missing alias").unwrap();
+            assert!(left_out(&warnings, DROPPED_UNBOUND), "{warnings:?}");
+            // The value named a hidden resource definition by its wire id only: without the alias it
+            // is left out rather than imported under a meaningless name.
+            fn bool_props(v: &Value, out: &mut usize) {
+                for p in v.get("componentProperties").and_then(Value::as_object).into_iter().flatten().map(|(_, p)| p) {
+                    if p.get("type").and_then(Value::as_str) == Some("BOOLEAN") {
+                        *out += 1;
+                    }
+                }
+                v.get("children").and_then(Value::as_array).into_iter().flatten().for_each(|c| bool_props(c, out));
+            }
+            let mut count = 0;
+            bool_props(&v["document"], &mut count);
+            assert_eq!(count, 0);
+            let (doc, _) = crate::rest::import_fig(&v, &|_| None).unwrap();
+            assert!(doc.nodes().all(|n| !matches!(&n.kind, figcraft_doc::NodeKind::Instance { props, .. } if !props.is_empty())));
+        }
+    }
 }

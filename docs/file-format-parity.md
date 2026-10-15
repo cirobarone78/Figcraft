@@ -1,23 +1,46 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (retained cached remote .fig main definitions and hidden-store export; bounded, source-sized .fig import decode budget and scoped component override-key aliases and initial bound paint-color settlement; M1 Figma import/export checks and robustness fixes; live desktop PAT and current-writer synthetic Figma checks; native Figma REST snapshots, byte/image imports and visible compatibility reports; SVG/PDF export depth refusal (#208); `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; `.fig` export: written files checked by opening them in other software; experimental `.fig` export; export and inspect behaviour suite and fixes; .fig import: editable vector networks and more layer kinds; embedded image colour profiles; `.fig` import, best effort; animated GIF fills and TIFF images; last major: created, formats from the installed Figma's Info.plist and help center, ours from source) · **Target:** Figma Design (desktop app 126.10.7)
 
 Every format Figma reads or writes, with FigCraft's support. Sources: `Info.plist` of
 `/Applications/Figma.app` (document types only; nothing inside the bundle's code was read), Figma's
 help center (image and video types, export formats), and FigCraft's source.
 
 **Summary (estimated):** ~60% ready. The core interchange formats (SVG, PNG, JPG, PDF) are solid
-and tested; Figma's own document, `.fig`, opens (best effort, not yet checked against real-world
-files) and can be written, experimentally: written files round trip through FigCraft's own
+and tested; Figma's own document, `.fig`, opens (best effort; three local real files checked for
+native save/open persistence, visual fidelity still unmeasured) and can be written, experimentally: written files round trip through FigCraft's own
 importer and were checked by opening them in other software (layers, fills, gradients, strokes,
 shadows, vectors, components and text draw as in FigCraft); effects such as glass and noise, images
 and prototype interactions are still unchecked there.
 
 ## Documents
 
+The desktop app, CLI and MCP also accept a Figma Design link through a bounded public REST
+transport with a temporary PAT, optional local variables and original image fills. A live desktop
+PAT import succeeds on a synthetic design; direct CLI/MCP token authentication remains unverified.
+It feeds the existing file importer; conversion grades and estimates stay unchanged. Both `.fig` and
+REST imports expose counts and compatibility notes in the editor ([guide](figma-import.md)).
+
+The 2026-10-13 local import check covers three supplied documents, including embedded image
+blobs in an older bare canvas. Native `.figcraft` persistence is exact for those imported results.
+No reference exports were supplied for a visual comparison. Grades stay unchanged.
+
+**M1 checks (2026-10-14):** The complete library run passes 261 Format and 851 Engine tests (two
+ignored; sample-gated tests pass empty unless `FIGCRAFT_FIG_SAMPLES` is set). With three private
+real files, selected Engine export/open, the strict canonical format round trip, legacy-schema and
+style/variable asset checks and exact native imported-field/image-byte persistence pass on the
+current source; the zero-warning check still reports import notes. The canonical format proof
+normalizes IDs and representations, excludes source/override/reference data, and uses numeric
+tolerance; assets separately retain style links/bindings/modes with ID-to-name mapping and exact
+variable JSON/style name/type lists. Figma accepts a small synthetic file from the current writer,
+with 124 read-only assertions, and a live desktop PAT import succeeds on a synthetic design.
+Broader/real-file Figma acceptance, source/pixel fidelity, native macOS, successful live
+variable/image downloads and direct CLI/MCP authentication remain unverified. See
+[validation and limits](figma-import.md#validation-and-limits).
+
 | Format | Figma | FigCraft read | FigCraft write | Fidelity / testing | Hours |
 |---|---|---|---|---|---|
-| `.fig` (Figma Design, `com.figma.document`, `application/x-figma`) | native (cloud; "Save local copy") | **yes, best effort** (`file.open`, `file.import`, drop, CLI, MCP) | **experimental** ([below](#export-to-fig-experimental)) | `.fig` files open (best effort): the zip, its deflate/zstd chunks and the kiwi schema are decoded generically and mapped by field name onto the REST importer, so pages, the layer tree, geometry, paints (styles resolved), strokes, effects, text with styled runs, vectors as editable vector networks (points, curved segments, filled areas with their winding, per-point corner radius and handle mirroring, end caps; outlines when the network is missing or damaged), auto layout (grid included), constraints, ellipse arcs, boolean operations, components, sets (with their descriptions), instances (expanded from their main with overrides, derived layout and property values), styles, variables with modes and bindings, prototyping (set-variable, set-variable-mode and conditional actions included) and image fills from the archive come across; sticky notes, shapes with text, connectors, tables, code blocks, slides and similar layers come in as the closest frames, text layers and vectors, with a warning; anything else is a warning. Not read: connector labels, table cells beyond their own layers, filled areas with their own fills, per-point stroke joins, variables bound to fields the editor can't bind, fixed or content-sized grid tracks, video fills. Tested on fixtures generated in code (`crates/format/src/fig/tests.rs`, `tail_tests.rs`, fuzzed) and by reading back what the export writes; no real-world files yet | read tail 5–10, write: checks against real files 5–15 |
+| `.fig` (Figma Design, `com.figma.document`, `application/x-figma`) | native (cloud; "Save local copy") | **yes, best effort** (`file.open`, `file.import`, drop, CLI, MCP) | **experimental** ([below](#export-to-fig-experimental)) | `.fig` files open (best effort): the zip, its deflate/zstd chunks and the kiwi schema are decoded generically and mapped by field name onto the REST importer, so pages, the layer tree, geometry, paints (styles resolved), strokes, effects, text with styled runs, vectors as editable vector networks (points, curved segments, filled areas with their winding, per-point corner radius and handle mirroring, end caps; outlines when the network is missing or damaged), auto layout (grid included), constraints, ellipse arcs, boolean operations, components, sets (with their descriptions), instances (expanded from their main with overrides, derived layout and property values), styles, variables with modes and bindings, prototyping (set-variable, set-variable-mode and conditional actions included) and image fills from the archive come across; sticky notes, shapes with text, connectors, tables, code blocks, slides and similar layers come in as the closest frames, text layers and vectors, with a warning; anything else is a warning. Not read: connector labels, table cells beyond their own layers, filled areas with their own fills, per-point stroke joins, variables bound to fields the editor can't bind, fixed or content-sized grid tracks, video fills. Tested on fixtures generated in code (`crates/format/src/fig/tests.rs`, `tail_tests.rs`, fuzzed) and by reading back what the export writes; three private real files pass native save/open, the strict canonical round trip and selected export/open checks; the zero-warning check still reports import notes; no visual reference exports | read tail 5–10, write: checks against real files 5–15 |
 | `.jam` (FigJam), `.deck` (Slides) | native to other Figma products | no | no | out of scope | — |
 | REST API file JSON (`GET /v1/files/:key`) + local variables JSON + `images/` folder | the API's output | **yes** (`file.open`, `file.import`, CLI) | no | pages, layer tree, geometry, paints, strokes, effects, text runs, vectors, auto layout, constraints, grids, components, sets, instances with overrides, component properties, styles, prototyping (incl. conditionals and variable modes), variables with modes, aliases, scopes and bindings; warnings for what's skipped (video triggers and actions, modifier keys). Unit tests in `crates/format/src/rest/*_tests.rs` | — |
 | `.figcraft` (ours: zip of `document.json` + images, versions inside) | — | yes | yes | streamed JSON, 50k layers save ~0.09 s / load ~0.16 s (`cargo xtask bench`); old files keep opening (`large_tests.rs`) | — |
@@ -60,7 +83,8 @@ export limit, not a native document nesting limit.
 
 ### Export to `.fig` (experimental)
 
-`file.export {format: "fig"}` (or a `path` ending in `.fig`), File ▸ Export… ▸ .fig (experimental),
+`file.export {format: "fig"}` (or a `path` ending in `.fig`), File ▸ Export… ▸ The whole file ▸ Figma (.fig),
+File ▸ Save as… ▸ Figma (.fig), `file.saveAs {path: "copy.fig"}`,
 `figcraft-cli export <file> -o <out>.fig` (and `convert`) and MCP's `export {format: "fig"}` write
 the whole document. The writer (`crates/format/src/fig/export.rs`) works from the same public format
 notes as the import and inverts its mapping: the zip holds `canvas.fig` (the fig-kiwi header, then a
@@ -95,6 +119,8 @@ each.
   main's id, the fields its layers change, by id path, through nested instances and swaps, and what
   follows from those as derived data: each layer's size, place and outline and the colours its
   variables give in the instance's mode; an instance scaled as a whole says its scale factor);
+  nested component-property assignments, including clears; inherited outer overrides take
+  precedence over local overrides and derived data;
   variable collections with their modes and variables (colour, number, string and boolean values
   per mode, aliases, descriptions, scopes) as nodes on a hidden page, the variables bound to
   paints, gradient stops, effect and layout grid fields and to layer and text fields (size, gaps,
@@ -108,6 +134,37 @@ each.
   controller buttons; navigate, overlays with their position, outside-click setting and
   background, swap, change to, scroll to, back, close, open link; transitions and easing, custom
   curves included), scrolling and fixed layers, flow starting points.
+- **Limits and rejected changes:** at most 256 MiB per archive, 4096 unique images, 256 MiB
+  total image bytes and 512 MiB per raw chunk. A nested instance with children whose written
+  type would change from `INSTANCE` to `FRAME`, or a nested instance without an unambiguous
+  source layer, is rejected before encoding or writing. Save as offers native `.figcraft` and
+  experimental `.fig`; the latter writes a whole-file copy and keeps the native destination
+  and unsaved changes. Regular Save uses the native destination. Choose a separate `.fig`
+  destination for the whole-file export.
+- **Source and text preservation (2026-10-14):** Import resolves explicit GUIDs through nested
+  contexts, swaps and materialized missing-main frames; export canonicalizes only the GUID address
+  and retains contextual scalar values as its comparison baseline. Explicit local text decoration
+  overrides a shared style's decoration. Focused synthetic cases cover identity, clears, rejected
+  foreign/cyclic links and absolute child positioning. These fixes do not imply complete corpus fidelity.
+- **Cached remote mains (2026-10-15):** Referenced component branches of internal-only `.fig`
+  canvases are kept in the native hidden library store, including their ancestor contexts and
+  modes. Instances can retain their real main links without adding visible pages or inventing
+  a live library connection. Native saves retain the definitions; `.fig` export emits the hidden
+  component roots under its internal asset canvas. The private import carrier has no effect on
+  public REST imports. Missing mains retain the previous frame fallback.
+- **Hidden Boolean resources (2026-10-14):** Referenced hidden declarations retain each actual
+  owner's Boolean default without adding one to a visible component. Export writes standard
+  SYMBOL resources; private aliases preserve native names in FigCraft. An unregistered Boolean
+  assignment without valid retained provenance is omitted with a counted warning. Nineteen focused BOOL,
+  fourteen capture/REST alias and one actual engine append/undo/redo/export check pass. The full
+  library/corpus run passes 261 Format tests and the three scoped real-file gates above. The
+  small synthetic browser/saved-copy check does not validate private aliases or current
+  real-file Figma acceptance. Inconsistent or orphaned private Boolean resource metadata is
+  dropped with a warning; opening and exporting no longer fail because of it.
+- **Schema test coverage:** modern/unknown versions use the full written-schema comparison;
+  explicit legacy `fig-kiwi` versions 4/70/89 require their core and check shared fields, IDs, types,
+  array flags, enum values and struct order strictly. Missing modern definitions/fields are
+  quantified as **UNVERIFIED**. This is a coverage boundary, not a full Figma-schema pass.
 - **Left out, with a warning each:** variable bindings the format has no field for (component
   properties, arc fields, font weight: written as the values they give), text styles on part of a
   text (written as values), variables' publishing, code syntax and inheritance settings, extended
@@ -162,7 +219,16 @@ each.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | Direct paint color bindings settle before the saved document baseline on open, including offscreen pages; geometry and component-property bindings retain their existing lifecycle. |
+| 2026-10-14 | minor | .fig component overrides resolve unique original-key aliases within selected mains; nested priority, swaps and current source identity retained and covered by synthetic round trips. |
+| 2026-10-14 | minor | .fig import decode accounting scales with the uncompressed message up to 1 GiB, retaining the 256 MiB floor and conservative export admission. A further private file opens with 29 pages and 103,263 nodes; native copy summaries match on reopen and the original hash is unchanged. This fixes decoder rejection, not issue #329 visual fidelity. Scores/estimates unchanged |
+| 2026-10-14 | minor | Save as opens the standard operating-system dialog directly for native `.figcraft` and experimental `.fig`. Windows has separate file-type choices; macOS accepts a filename ending in `.fig`. A `.fig` copy uses the existing whole-file exporter and keeps the native destination and unsaved changes. Explicit `.fig` Engine/MCP save paths write the same copy. Scores/estimates unchanged |
+| 2026-10-14 | minor | M1 validation refresh: a current-writer synthetic file is accepted in Figma with 124 read-only assertions; live desktop PAT import succeeds on a synthetic design, with optional variables HTTP 403 reported as a warning. Broader/real-file acceptance, source/pixel fidelity, native macOS, successful live variable/image downloads and direct CLI/MCP authentication remain open ([scope](figma-import.md#validation-and-limits)). Scores/estimates unchanged |
+| 2026-10-14 | minor | Figma import/export robustness: large native files open, `.fig` size budgets, deep REST JSON, inconsistent Boolean metadata dropped with a warning, text-style unlinking on `.fig` export, byte imports not kept for Repeat, colliding ids renamed on append; import docs made environment-neutral. Historical assessment unchanged |
+| 2026-10-14 | minor | Referenced hidden BOOL retention/guard and actual append checks pass. Complete library run: 223 Format pass, 832 Engine pass/2 ignored (counts include sample-gated tests that pass empty without `FIGCRAFT_FIG_SAMPLES`); with three private sample files, selected Engine export/open, strict canonical format round trip, legacy schema, style/variable asset and exact native imported-field/image-byte persistence checks pass within their stated scope; the zero-warning check still reports import notes. A small synthetic file was accepted in Figma's browser app; a read-only check through Figma's own MCP server passes 52 assertions on it. Link/PAT import is tested only against synthetic HTTP responses. Not verified: live Figma API, current-writer Figma acceptance, native macOS, pixel fidelity. Historical assessment unchanged |
+| 2026-10-14 | minor | M1 real native persistence and selected engine export/open proof recorded; GUID/context source preservation, missing-main frame namespaces, text decoration and absolute child positioning covered. Strict semantic/property and Figma interoperability checks remain open; legacy schema gaps UNVERIFIED, grades unchanged |
 | 2026-10-14 | minor | SVG/PDF depth overflow (#208) is checked before bounds and drawing; public checked APIs return the offending root/layer, commands and CLI report it, and no incomplete export replaces an existing file. Tested at depths 255/256/257, with inner roots, hidden branches, masks, raster fallbacks and multiple roots/pages. Numbers unchanged. |
+| 2026-10-13 | minor | Native Figma REST snapshots reuse the editable importer; byte/image inputs, optional variables, cancellation, download/parser bounds and visible notes; conversion grades unchanged |
 | 2026-10-13 | minor | `.fig` export (gap 1): instances write what they change from their main as an override addressed by the main's id (their size, name and paints were lost elsewhere without it), what follows for their layers as derived data, and a scale factor when scaled as a whole; layers of a nested instance swapped for another component keep their overrides; variable collections, modes, variables and their bindings, the modes frames and pages set, shared styles with their links and variable-width strokes are written, and the import reads all of it back (style definitions and unused styles, variable order and scopes, bindings on paint lists, gradient stops, effects and layout grids, page modes, text field bindings, which a `.fig` import used to drop, and width profiles). Opened `.fig` and file JSON documents link nested instances of variants (and any nested instance under a name of its own) to their main's layers; they stayed unlinked, so a second export lost what they changed. Checked by opening written files in other software: resized and scaled instances keep their size and lay their layers out for it, variables with their modes and colour bindings resolve there (a frame set to another mode shows that mode's colours, also inside instances), colour, text, effect and grid styles are listed, and variable-width strokes that are the same on both sides of the path draw with their width; number, string and boolean bindings and bindings on effects, layout guides and gradient stops come across as the values they give but did not show as bound there (their entries now also name the layer field they set, not yet checked there), and strokes wider on one side of the path are written as filled outlines, no longer editable strokes there (the stroke itself is kept as plugin data and our own import puts it back; not yet checked there). Numbers unchanged |
 | 2026-10-12 | minor | `.fig` export made to open elsewhere (gap 1): the document and its pages say they are visible and opaque (left out, nothing was drawn), the schema in the file uses the format's own names, kinds, field ids and enum values, rectangles are rounded rectangles with four radii, frames and shapes carry their fill outline and plain strokes their stroke outline, text carries its layout settings, font styles use their standard names, line heights that are a share of the font size are raw multipliers, masks keep their type (read back too); the import reads per-side stroke weights whose zero sides are left out. Written files were checked by opening them in other software: layers, fills, gradients, strokes, shadows, vectors, components and text draw as in FigCraft; effects such as glass and noise, images and prototype interactions are still unchecked there, and variables are not written. Numbers unchanged |
 | 2026-10-12 | minor | Experimental `.fig` export (gap 1): `file.export {format: "fig"}`, File ▸ Export… ▸ .fig (experimental), the CLI and MCP write the whole document (layer tree, geometry, paints with image bytes, strokes, effects, text with styled runs, vector networks, auto layout, constraints, components, sets, instances with their overrides and property values, prototype interactions) with a kiwi encoder that mirrors the decoder and the schema of the fields written; what's left out is a warning. The import gained ellipse arcs, boolean operation types and component set descriptions, and reads durations as whole milliseconds. Verified only by round trips through our own importer. Summary ~59% → ~60%; `.fig` write 15–30 h → 5–15 h (checks against real files) |

@@ -17,7 +17,8 @@ fn ex(s: &mut Session, cmd: &str, p: Value) -> Value {
 fn scene(s: &mut Session) -> (NodeId, NodeId) {
     let f = id_of(&ex(s, "frame.create", json!({"x": 0, "y": 0, "width": 400, "height": 300}))["id"]).unwrap();
     let r = id_of(&ex(s, "shape.rectangle", json!({"x": 40, "y": 40, "width": 200, "height": 60, "parent": f}))["id"]).unwrap();
-    let t = id_of(&ex(s, "text.create", json!({"text": "Hi there", "x": 60, "y": 60, "parent": f, "props": {"fontSize": 16}}))["id"]).unwrap();
+    // Double-click targets use a fixed box so the optional fonts do not affect this fixture.
+    let t = id_of(&ex(s, "text.create", json!({"text": "Hi there", "x": 60, "y": 60, "parent": f, "width": 80, "height": 20, "props": {"fontSize": 16, "width": 80, "height": 20, "textAutoResize": "none"}}))["id"]).unwrap();
     let g = id_of(&ex(s, "object.group", json!({"ids": [r, t]}))["id"]).unwrap();
     ex(s, "select.none", json!({}));
     (g, t)

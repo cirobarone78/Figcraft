@@ -190,7 +190,7 @@ separate calls. Returns `{queued}`.
 
 Invoke a menu item exactly like clicking it (this may open a dialog). Returns `{ok, lastError}`.
 
-### `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, mainMenu?, focusRegion?, colorPicker?, variables?, layerFilter?, collapseLayers?, exportPreview?, preview?, presentScroll?, colorProfileDialog?, stylePicker?, stylePickerEdit?, stylePickerView?, iconGallery?, protoEditor?, contextMenu?, contextSelectLayer?, commentOpen?, commentDraft?, commentFilter?, commentSort?, commentSearch?, commentReply?, commentEdit?, presentComments?, devCompare?, devCompareMode?, devCompareSplit?, annotationFilter?, resetFrameStats?, pluginsWindow?, pluginsTab?, pluginConfirm?, pluginForm?}`
+### `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, mainMenu?, focusRegion?, colorPicker?, variables?, layerFilter?, collapseLayers?, exportPreview?, figmaImportPreview?, preview?, presentScroll?, colorProfileDialog?, stylePicker?, stylePickerEdit?, stylePickerView?, iconGallery?, protoEditor?, contextMenu?, contextSelectLayer?, commentOpen?, commentDraft?, commentFilter?, commentSort?, commentSearch?, commentReply?, commentEdit?, presentComments?, devCompare?, devCompareMode?, devCompareSplit?, annotationFilter?, resetFrameStats?, pluginsWindow?, pluginsTab?, pluginConfirm?, pluginForm?}`
 
 Switch panels and modes: `rightTab` `design|prototype|inspect`, `leftTab` `file|assets`, `theme`,
 `home` (bool), `homeSection` (`recents`, `online` or `templates`: which section the home screen shows, as `ui.inspect` reports it; opening
@@ -208,7 +208,10 @@ outside sRGB; `null` closes it), `variables` (bool,
 or a collection id or name to show, or `{library, collection?}` for an enabled library's collection: the
 Variables editor), `layerFilter` (string:
 open the layers search with that filter; `null` closes it), `collapseLayers` (true: collapse the
-layers tree), `exportPreview` (bool: the Design panel Export section's preview), `preview` (true or a
+layers tree), `exportPreview` (bool: the Design panel Export section's preview), `figmaImportPreview`
+(`{stage, completed, total}`, `stage` being `file|variables|images|retry`: open the Import from
+Figma dialog in its importing phase with a synthetic job at that progress, for screenshots; nothing is
+downloaded and Cancel or Escape closes it), `preview` (true or a
 frame id: open the prototype preview pane like `proto.preview`; false or `null` closes it),
 `presentScroll` (`[x, y]`: scroll the presented screen, the full window's else the pane's, clamped
 to what it can scroll), `colorProfileDialog` (`srgb|displayP3`: open File ▸ Color profile with that

@@ -1,6 +1,6 @@
 # Where FigCraft falls short of Figma
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (`.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; sharing with a join code; text box sizes measured against documents re-saved by other software; live sessions per document; .fig export checked by opening written files in other software; experimental .fig export; keyboard shortcut parity suite and bindings; Simplified Chinese draft catalog; Latin American Spanish overlay; prototyping tail: gamepad triggers, widgets in prototypes, mode lookups; plugin directory on figcraft-server; Japanese and Korean draft catalogs and CJK UI fonts; plugin widgets and the plugin panel tail; French, German and Brazilian Portuguese draft catalogs; cursor chat and spotlight in live sessions; layers and assets panels behaviour suite and fixes; vector multi-edit and edit tail; dev resources links; extended collections tail; branch version history and finer list merges; comments and version history behaviour suite and fixes; canvas navigation, guides and grids behaviour suite and fixes; `.fig` import: editable vector networks, more layer kinds, variable prototype actions; `.fig` import, best effort: gap 1 down to its tail; Windows QA pass: everyday workflows on Windows 11, eight fixes incl. unsaved work kept after a crash or a forced quit; Display P3: gamut warning and soft-proof (true P3 blocked upstream); several windows; localization layer with a draft Spanish catalog; hosting figcraft-server: wss in the desktop app, server releases, deployment guide; plugin panels and settings; canvas fixes: boolean hit testing on the result, group drags, frame outlines and slices; code connect; stretch and scatter brushes, pen pressure; text on a path and pattern fills; team libraries on the server and swap library; branches: create, update from main, review and merge; animated GIF fills and TIFF images; Open recent, outlines for the selection and mask outlines: menu breadth 100%; extended collections, variables import/export, gradient stop and variant bindings: gap 14 down to its tail) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (M1 Figma import/export checks and robustness fixes; live desktop PAT and current-writer synthetic Figma checks; native Figma REST snapshots, byte/image imports and visible compatibility reports; `.fig` export: instance sizes, variables with modes, shared styles, variable-width strokes; sharing with a join code; text box sizes measured against documents re-saved by other software; live sessions per document; .fig export checked by opening written files in other software; experimental .fig export; keyboard shortcut parity suite and bindings; Simplified Chinese draft catalog; Latin American Spanish overlay; prototyping tail: gamepad triggers, widgets in prototypes, mode lookups; plugin directory on figcraft-server; Japanese and Korean draft catalogs and CJK UI fonts; plugin widgets and the plugin panel tail; French, German and Brazilian Portuguese draft catalogs; cursor chat and spotlight in live sessions; layers and assets panels behaviour suite and fixes; vector multi-edit and edit tail; dev resources links; extended collections tail; branch version history and finer list merges; comments and version history behaviour suite and fixes; canvas navigation, guides and grids behaviour suite and fixes; `.fig` import: editable vector networks, more layer kinds, variable prototype actions; `.fig` import, best effort: gap 1 down to its tail; Windows QA pass: everyday workflows on Windows 11, eight fixes incl. unsaved work kept after a crash or a forced quit; Display P3: gamut warning and soft-proof (true P3 blocked upstream); several windows; localization layer with a draft Spanish catalog; hosting figcraft-server: wss in the desktop app, server releases, deployment guide; plugin panels and settings; canvas fixes: boolean hit testing on the result, group drags, frame outlines and slices; code connect; stretch and scatter brushes, pen pressure; text on a path and pattern fills; team libraries on the server and swap library; branches: create, update from main, review and merge; animated GIF fills and TIFF images; Open recent, outlines for the selection and mask outlines: menu breadth 100%; extended collections, variables import/export, gradient stop and variant bindings: gap 14 down to its tail) · **Target:** Figma Design (desktop app 126.10.7)
 
 Every known shortfall against Figma, one entry each, ranked by how much it stops a Figma user from
 doing real work in FigCraft. Agents: pick work from the top unless the owner says otherwise. The
@@ -10,13 +10,17 @@ everywhere unless marked measured.
 
 ## Ranked
 
+Native Figma REST snapshot import and `.fig` compatibility reports are available
+([guide](figma-import.md)). They improve access to designs; the real-file fidelity gap below
+still requires measured comparisons and broader coverage.
+
 No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passes. Beta blockers are marked.
 
 | # | Gap | Kind | Hours | Doc |
 |---|---|---|---|---|
-| 1 | `.fig` files: best-effort import with editable vector networks and stand-ins for non-design layers landed, and an experimental export (round trips through our own importer; written files opened in other software, where layers, fills, gradients, strokes, shadows, vectors, components and text draw as in FigCraft, instances keep their size and variables with modes and colour styles come across); real-file checks and the small tail left (**beta blocker** until checked on real files, gap 3) | File format | 5–10 | [file-format-parity](file-format-parity.md) |
+| 1 | `.fig` files: best-effort import with editable vector networks and stand-ins for non-design layers landed, and an experimental export (round trips through our own importer; written files opened in other software, where layers, fills, gradients, strokes, shadows, vectors, components and text draw as in FigCraft, instances keep their size and variables with modes and colour styles come across); real-file checks and the small tail left (**beta blocker** until semantic and visual exchange are measured on a broader real-file corpus, gap 3) | File format | 5–10 | [file-format-parity](file-format-parity.md) |
 | 2 | Multiplayer and sharing are a preview, without accounts (**beta blocker**) | Feature | 42–84 | [collaboration-parity](collaboration-parity.md) |
-| 3 | Nothing checked against real Figma files | Fidelity | 15–30 | [target-app-parity](target-app-parity.md) |
+| 3 | Visual fidelity on real Figma files remains unmeasured; three local imports pass native save/open | Fidelity | 15–30 | [target-app-parity](target-app-parity.md) |
 | 4 | Interaction fidelity not compared tool by tool | UI/UX | 40–60 | [ui-parity](ui-parity.md) |
 | 5 | Localization: English plus unreviewed Spanish (and Latin American Spanish), French, German, Brazilian Portuguese, Japanese, Korean and Simplified Chinese drafts | Localization | 29–51 | [localization-parity](localization-parity.md) |
 | 6 | Plugins: widgets take clicks only, a self-hosted directory but no public catalogue; Figma's plugins don't run | Ecosystem | 8–26 | [target-app-parity](target-app-parity.md) |
@@ -42,10 +46,11 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 ### 1. `.fig` files: the import's tail
 - **Landed (2026-10-11):** `.fig` files open (best effort): the zip, its deflate/zstd chunks and the kiwi schema are decoded generically and mapped by field name onto the REST importer, so pages, the layer tree, geometry, paints (styles resolved), strokes, effects, text with styled runs, vectors, auto layout (grid included), constraints, components, sets, instances (expanded from their main with overrides, derived layout and property values), styles, variables with modes and bindings, prototyping and image fills from the archive come across; anything else is a warning (`crates/format/src/fig`). Then (2026-10-11): vectors open as editable vector networks (per-point corner radius, handle mirroring, end caps; outlines when the network blob is missing or damaged), sticky notes, shapes with text, connectors, tables, code blocks, slides and similar layers import as the closest frames, text layers and vectors with a warning, and set-variable, set-variable-mode and conditional prototype actions come across. `file.open`,
-  `file.import`, drag and drop, the CLI and MCP's `open_file` read `.fig`; the file is never saved
-  over.
+  `file.import`, drag and drop, the CLI and MCP's `open_file` read `.fig`; open creates an unsaved
+  document without choosing the source path as its save destination. Choose a new destination:
+  an explicitly supplied save/export path can overwrite an existing file.
 - **Landed (2026-10-12):** an experimental export: `file.export {format: "fig"}`, File ▸ Export… ▸
-  .fig (experimental), `figcraft-cli export --format fig` and MCP's `export` write the whole document
+  .fig, `figcraft-cli export --format fig` and MCP's `export` write the whole document
   with a kiwi encoder mirroring the decoder and a schema of the fields written: the layer tree,
   geometry, paints with image bytes, strokes, effects, text with styled runs, vector networks, auto
   layout, constraints, components, sets, instances with their overrides and property values, and
@@ -60,19 +65,37 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   derived data for their layers, a scale factor), variables with modes and bindings, shared styles
   and variable-width strokes are written and read back; checked there: resized and scaled instances keep their size and lay their layers out for it, variables with their modes and colour bindings resolve there (a frame set to another mode shows that mode's colours, also inside instances), colour, text, effect and grid styles are listed, and variable-width strokes that are the same on both sides of the path draw with their width; number, string and boolean bindings and bindings on effects, layout guides and gradient stops come across as the values they give but did not show as bound there (their entries now also name the layer field they set, not yet checked there), and strokes wider on one side of the path are written as filled outlines, no longer editable strokes there (the stroke itself is kept as plugin data and our own import puts it back; not yet checked there),
   like effects such as glass and noise, images and prototype interactions.
+  Then (2026-10-14): nested assignment clears, outer override priority and export limits were
+  corrected; unsupported nested type changes with children are rejected. Real-file fidelity
+  and Figma acceptance of these changes remain separate checks.
+  **M1 update (2026-10-14):** GUID/context source identity, local text decoration, absolute
+  positioning and hidden BOOL resources have focused regressions. The complete library run passes
+  261 Format and 851 Engine tests (two ignored; sample-gated tests pass empty unless
+  `FIGCRAFT_FIG_SAMPLES` is set). With three private real files, selected Engine export/open, the
+  strict canonical format round trip, legacy-schema and style/variable asset checks and exact
+  native persistence pass on the current source; the zero-warning check still reports import
+  notes. Numeric tolerance and identity/representation/reference normalization limit the format
+  proof; the separate assets check retains links/bindings/modes after ID-to-name mapping. Figma
+  accepts a small synthetic file from the current writer, with 124 read-only assertions. A live
+  desktop PAT import succeeds on a synthetic design; optional variables HTTP 403 becomes a warning.
+  Broader/real-file Figma acceptance, source/pixel fidelity, native macOS, successful live
+  variable/image downloads and direct CLI/MCP authentication remain open. Estimates unchanged
+  ([scope](figma-import.md#validation-and-limits)).
 - **Missing:** connector labels, elbowed or curved connectors without a saved path (drawn straight),
   table cells beyond their own layers, filled areas of a vector with their own fills, per-point stroke
   joins, variables bound to fields the editor can't bind, fixed or content-sized grid tracks and video
   fills aren't read; text lays out again with
-  local fonts. Nothing has been checked against real-world files yet (gap 3). The export is checked
-  only against our own importer: whether other apps open its files is unknown.
+  local fonts. Three private real files import, preserve native save/open and pass the strict
+  canonical `.fig` export/reimport comparison on the current source; their zero-warning check still
+  reports import notes, and visual fidelity remains unmeasured (gap 3).
 - **Evidence:** fixtures generated in code (`crates/format/src/fig/tests.rs` and `tail_tests.rs`: kiwi
   round trips, every mapped feature, vector network blobs, truncation, bit flips and junk never panic); `crates/engine/src/fig_import_tests.rs`.
   Export: 60 generated documents round trip through the importer layer by layer, written files
   decode with the generic decoder and list parents first, the encoder agrees with the decoder,
   junk documents never panic (`crates/format/src/fig/export_tests.rs`,
   `crates/engine/src/fig_export_tests.rs`).
-- **Impact:** existing work can be brought across, but only real files will show how much of it.
+- **Impact:** existing work can be brought across; the three private local files establish scoped
+  persistence/engine round-trip proof, while broader real-file and Figma comparisons are still needed.
 - **Estimate:** 5–10 h for the read tail (real-file fixes, connector labels, table cells); checking the export against real files a further 5–15 h (with gap 3).
 
 ### 2. Multiplayer and sharing are a preview, without accounts
@@ -100,12 +123,26 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 - **Estimate:** 42–84 h: accounts, teams and per-person permissions, shared comments and versions
   (numbers from before the server landed; re-measured next).
 
-### 3. Nothing checked against real Figma files
+### 3. Visual fidelity on real Figma files remains unmeasured
 - **Missing:** a corpus of real documents (design systems, app screens, prototypes) imported and
   compared with Figma's own PNG/SVG/PDF exports.
 - **Evidence:** every corpus in the repo is synthetic (`crates/svg/tests/corpus`, the synthetic
   design system in `crates/engine/src/synthetic_ds.rs`). Scores were self-graded by the agents that
   built the features.
+- **Local import check (2026-10-13):** three supplied real documents open and preserve all persisted
+  document fields and encoded images through native save/open. An embedded-image resolver fix is
+  covered by synthetic regressions. Compatibility notes remain; no reference exports were supplied,
+  so pixel fidelity is not established. Personal sample files and outputs stay outside the repo.
+- **M1 refresh (2026-10-14):** Native checks preserve imported fields/image bytes exactly for
+  all three private files on the current source. The complete library run passes 261 Format/851
+  Engine tests (two ignored; sample-gated tests included) and all three selected Engine, strict
+  canonical format, legacy-schema and style/variable asset cases. Canonicalization and numeric
+  tolerance remain part of that proof; the zero-warning check still reports import notes. Figma
+  accepts a small synthetic file from the current writer, with 124 read-only assertions; a live
+  desktop PAT import succeeds on a synthetic design. Broader/real-file Figma acceptance,
+  source/pixel fidelity, native macOS, successful live variable/image downloads and direct CLI/MCP
+  authentication remain open
+  ([proof](figma-import.md#validation-and-limits)).
 - **Impact:** unknown fidelity in auto layout sizing, text metrics, effects and component
   resolution on real files; the numbers in this repo can't be trusted beyond "estimated" until it
   exists.
@@ -394,6 +431,11 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-14 | minor | M1 validation refresh: a current-writer synthetic file is accepted in Figma with 124 read-only assertions; live desktop PAT import succeeds on a synthetic design, with optional variables HTTP 403 reported as a warning. Broader/real-file acceptance, source/pixel fidelity, native macOS, successful live variable/image downloads and direct CLI/MCP authentication remain open ([scope](figma-import.md#validation-and-limits)). Scores/estimates unchanged |
+| 2026-10-14 | minor | Figma import/export robustness: large native files open, `.fig` size budgets, deep REST JSON, inconsistent Boolean metadata dropped with a warning, text-style unlinking on `.fig` export, byte imports not kept for Repeat, colliding ids renamed on append; import docs made environment-neutral. Scores/estimates unchanged |
+| 2026-10-14 | minor | Referenced hidden BOOL retention/guard and actual append checks pass. Complete library run: 223 Format pass, 832 Engine pass/2 ignored (counts include sample-gated tests that pass empty without `FIGCRAFT_FIG_SAMPLES`); with three private sample files, selected Engine export/open, strict canonical format round trip, legacy schema, style/variable asset and exact native imported-field/image-byte persistence checks pass within their stated scope; the zero-warning check still reports import notes. A small synthetic file was accepted in Figma's browser app; a read-only check through Figma's own MCP server passes 52 assertions on it. Link/PAT import is tested only against synthetic HTTP responses. Not verified: live Figma API, current-writer Figma acceptance, native macOS, pixel fidelity. Scores/estimates unchanged |
+| 2026-10-14 | minor | M1 scoped real-file persistence/engine export proof added without closing the semantic/visual beta gap; strict property round-trip, modern schema coverage, live Figma and final Mac/delivery checks remain open. Estimates unchanged |
+| 2026-10-13 | minor | Native Figma REST access and visible `.fig`/REST compatibility notes added; real-file fidelity remains a gap, grades and estimates unchanged |
 | 2026-10-13 | minor | Gap 1: the experimental `.fig` export writes instance sizes (resized, filling an auto layout, scaled), variables with modes and bindings, shared styles and variable-width strokes, and the import reads them back. Checked by opening written files in other software: resized and scaled instances keep their size and lay their layers out for it, variables with their modes and colour bindings resolve there (a frame set to another mode shows that mode's colours, also inside instances), colour, text, effect and grid styles are listed, and variable-width strokes that are the same on both sides of the path draw with their width; number, string and boolean bindings and bindings on effects, layout guides and gradient stops come across as the values they give but did not show as bound there (their entries now also name the layer field they set, not yet checked there), and strokes wider on one side of the path are written as filled outlines, no longer editable strokes there (the stroke itself is kept as plugin data and our own import puts it back; not yet checked there). Hours and the ranking unchanged |
 | 2026-10-12 | minor | Gap 2: your online files landed (the app records the files it put on a server with their owner tokens, Home ▸ Online lists them and opens them again as their owner, with sharing, rename, removal and forget from the list; one request per server tells which are still there; tabs mark files in a live session). What is left is unchanged: accounts, teams and per-person permissions, shared comments and versions. Hours unchanged |
 | 2026-10-12 | minor | Gap 2: sharing with a join code (Share ▸ Online or Local network, one Start sharing button, a short code to give others, one join field for a code or a link; the server names links with codes and limits wrong ones) added to the landed list; usability, so the estimate and ranking are unchanged |

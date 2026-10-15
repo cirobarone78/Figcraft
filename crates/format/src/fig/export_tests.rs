@@ -1014,33 +1014,6 @@ fn junk_documents_never_panic() {
     }
 }
 
-/// Link each instance's layers to its main's by position, as they are imported (the engine
-/// links them by path after loading).
-fn link(doc: &mut Document) {
-    fn zip(doc: &mut Document, mine: NodeId, theirs: NodeId) {
-        let pairs: Vec<(NodeId, NodeId)> = match (doc.node(mine), doc.node(theirs)) {
-            (Some(m), Some(t)) => m.children.iter().copied().zip(t.children.iter().copied()).collect(),
-            _ => return,
-        };
-        for (m, t) in pairs {
-            if let Some(n) = doc.node_mut(m) {
-                n.source.get_or_insert(t);
-            }
-            zip(doc, m, t);
-        }
-    }
-    let insts: Vec<(NodeId, NodeId)> = doc
-        .nodes()
-        .filter_map(|n| match &n.kind {
-            NodeKind::Instance { component, .. } => Some((n.id, *component)),
-            _ => None,
-        })
-        .collect();
-    for (i, c) in insts {
-        zip(doc, i, c);
-    }
-}
-
 /// Local only (`FIGCRAFT_FIG_SAMPLES`): each sample imported, exported and imported again comes
 /// back the same, apart from what the export leaves out (shared style links, variables).
 #[test]
@@ -1048,7 +1021,6 @@ fn local_samples_round_trip() {
     for p in super::tests::samples() {
         let bytes = std::fs::read(&p).unwrap();
         let (mut a, _) = import(&bytes, "sample").unwrap();
-        link(&mut a);
         let (out, warnings) = export(&a, None).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         let (mut b, _) = import(&out, "sample").unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         for d in [&mut a, &mut b] {

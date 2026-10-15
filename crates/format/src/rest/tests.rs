@@ -695,7 +695,17 @@ fn deep_nesting_and_huge_values_are_capped() {
     for n in doc.nodes() {
         assert!(n.width <= MAX_SIZE && n.height >= 0.0 && n.corners.radii[0] <= MAX_SIZE && n.stroke.weight <= MAX_SIZE);
     }
-    // serde_json's own recursion limit turns very deep text into an error, not a crash.
+    // As text: layers just past MAX_DEPTH still parse and are skipped with the same warning ...
+    let mut node = json!({"id": "leaf", "name": "Leaf", "type": "RECTANGLE"});
+    for i in 0..MAX_DEPTH + 10 {
+        node = json!({"id": format!("g{i}"), "name": "G", "type": "FRAME", "children": [node]});
+    }
+    let text = serde_json::to_vec(&json!({"name": "F", "document": {"id": "0:0", "type": "DOCUMENT", "children": [
+        {"id": "0:1", "name": "Page", "type": "CANVAS", "children": [node]}]}}))
+    .unwrap();
+    let (_, warnings) = try_import(&text, &no_images).unwrap().unwrap();
+    assert!(warnings.iter().any(|w| w.contains("nested deeper")), "{warnings:?}");
+    // ... and text nested past MAX_JSON_NESTING is an error, not a crash.
     let deep = format!("{{\"document\":{{\"type\":\"DOCUMENT\",\"children\":{}{}}}}}", "[".repeat(5000), "]".repeat(5000));
     assert!(matches!(try_import(deep.as_bytes(), &no_images), Some(Err(_))));
 }
@@ -706,4 +716,20 @@ fn layer_count_is_capped() {
     let (doc, warnings) = one(Value::Array(kids));
     assert_eq!(doc.node_count(), MAX_NODES + 1);
     assert!(warnings.iter().any(|w| w.contains("more than")), "{warnings:?}");
+}
+
+/// Text nested as deep as the parser accepts parses and imports within a 1 MiB stack (the
+/// default stack of a wasm module): the nesting cap leaves no room for a stack overflow.
+#[test]
+fn deepest_accepted_text_fits_a_small_stack() {
+    let levels = (MAX_JSON_NESTING - 8) / 2;
+    let mut node = json!({"id": "leaf", "name": "Leaf", "type": "RECTANGLE"});
+    for i in 0..levels {
+        node = json!({"id": format!("g{i}"), "name": "G", "type": "FRAME", "children": [node]});
+    }
+    let text = serde_json::to_vec(&json!({"name": "F", "document": {"id": "0:0", "type": "DOCUMENT", "children": [
+        {"id": "0:1", "name": "Page", "type": "CANVAS", "children": [node]}]}}))
+    .unwrap();
+    let worker = std::thread::Builder::new().stack_size(1 << 20).spawn(move || try_import(&text, &no_images).map(|r| r.is_ok())).unwrap();
+    assert_eq!(worker.join().unwrap(), Some(true));
 }

@@ -11,10 +11,17 @@ use std::fmt;
 /// Deepest struct/message nesting decoded.
 const MAX_DEPTH: usize = 64;
 /// Most values decoded from one message (every scalar, array element and field counts).
-const MAX_VALUES: usize = 20_000_000;
+pub(super) const MAX_VALUES: usize = 20_000_000;
 /// Most definitions in a schema, and fields in one definition.
 const MAX_DEFS: usize = 10_000;
 const MAX_FIELDS: usize = 10_000;
+/// Schema tables and their names share a budget across all definitions.
+const MAX_SCHEMA_FIELDS: usize = 100_000;
+const MAX_SCHEMA_NAME: usize = 1024;
+const MAX_SCHEMA_NAME_BYTES: usize = 16 * 1024 * 1024;
+/// Retained decoded strings, blobs and value cells; a value count alone does not cap allocations.
+pub(super) const MAX_DECODE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_IMPORT_DECODE_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct KiwiError(pub String);
@@ -216,12 +223,20 @@ impl<'b> Reader<'b> {
         Ok(f32::from_bits(bits.rotate_left(23)))
     }
 
-    fn string(&mut self) -> Result<String, KiwiError> {
+    fn string_bytes(&mut self, max: usize) -> Result<&'b [u8], KiwiError> {
         let rest = self.data.get(self.pos..).unwrap_or_default();
-        let len = rest.iter().position(|b| *b == 0).ok_or_else(|| KiwiError("unterminated string".into()))?;
-        let s = String::from_utf8_lossy(self.take(len)?).into_owned();
+        let len =
+            rest.iter().take(max.saturating_add(1)).position(|b| *b == 0).ok_or_else(|| KiwiError("unterminated or oversized string".into()))?;
+        let s = self.take(len)?;
         self.pos += 1;
         Ok(s)
+    }
+
+    fn schema_string(&mut self, budget: &mut usize) -> Result<String, KiwiError> {
+        let bytes = self.string_bytes(MAX_SCHEMA_NAME)?;
+        let size = if std::str::from_utf8(bytes).is_ok() { bytes.len() } else { bytes.len().saturating_mul(3) };
+        *budget = budget.checked_sub(size).ok_or_else(|| KiwiError("schema: names exceed the byte budget".into()))?;
+        Ok(String::from_utf8_lossy(bytes).into_owned())
     }
 }
 
@@ -235,8 +250,10 @@ impl Schema {
         }
         let mut defs = Vec::with_capacity(count);
         let mut raw_types = Vec::new();
+        let mut field_budget = MAX_SCHEMA_FIELDS;
+        let mut name_budget = MAX_SCHEMA_NAME_BYTES;
         for _ in 0..count {
-            let name = r.string()?;
+            let name = r.schema_string(&mut name_budget)?;
             let kind = match r.byte()? {
                 0 => Kind::Enum,
                 1 => Kind::Struct,
@@ -247,9 +264,10 @@ impl Schema {
             if n > MAX_FIELDS || n > r.left() {
                 return err("schema: too many fields");
             }
+            field_budget = field_budget.checked_sub(n).ok_or_else(|| KiwiError("schema: too many total fields".into()))?;
             let mut fields = Vec::with_capacity(n);
             for _ in 0..n {
-                let fname = r.string()?;
+                let fname = r.schema_string(&mut name_budget)?;
                 let ty = r.var_int()?;
                 let array = r.byte()? & 1 != 0;
                 let value = r.var_uint()?;
@@ -284,23 +302,127 @@ impl Schema {
         self.defs.iter().position(|d| d.name == name)
     }
 
+    /// Refuse an encoded value tree whose decoded allocations exceed the reader's budgets.
+    pub(super) fn decoded_cost(&self, root: usize, value: &Kv<'_>) -> Result<(usize, usize), KiwiError> {
+        let mut decoder = Decoder { schema: self, r: Reader { data: &[], pos: 0 }, budget: MAX_VALUES, byte_budget: MAX_DECODE_BYTES };
+        decoder.measure_def(root, value, 0)?;
+        Ok((MAX_DECODE_BYTES - decoder.byte_budget, MAX_VALUES - decoder.budget))
+    }
+
     /// Decode a message of definition `root`.
     pub fn decode_message<'s>(&'s self, root: usize, data: &[u8]) -> Result<Kv<'s>, KiwiError> {
-        let mut d = Decoder { schema: self, r: Reader { data, pos: 0 }, budget: MAX_VALUES };
+        self.decode_message_with_budget(root, data, MAX_DECODE_BYTES)
+    }
+
+    /// Decode an imported message with headroom proportional to its encoded size, capped at 1 GiB.
+    pub(super) fn decode_import_message<'s>(&'s self, root: usize, data: &[u8]) -> Result<Kv<'s>, KiwiError> {
+        self.decode_message_with_budget(root, data, import_decode_budget(data.len()))
+    }
+
+    fn decode_message_with_budget<'s>(&'s self, root: usize, data: &[u8], byte_budget: usize) -> Result<Kv<'s>, KiwiError> {
+        let mut d = Decoder { schema: self, r: Reader { data, pos: 0 }, budget: MAX_VALUES, byte_budget };
         d.def(root, 0)
     }
+}
+
+fn import_decode_budget(encoded_bytes: usize) -> usize {
+    decode_budget(encoded_bytes, 256 * 1024 * 1024, MAX_IMPORT_DECODE_BYTES)
+}
+
+fn decode_budget(encoded_bytes: usize, minimum: usize, maximum: usize) -> usize {
+    minimum.max(encoded_bytes.saturating_mul(16)).min(maximum)
 }
 
 struct Decoder<'s, 'b> {
     schema: &'s Schema,
     r: Reader<'b>,
     budget: usize,
+    byte_budget: usize,
 }
 
 impl<'s> Decoder<'s, '_> {
     fn spend(&mut self, n: usize) -> Result<(), KiwiError> {
         self.budget = self.budget.checked_sub(n).ok_or_else(|| KiwiError("message: too many values".into()))?;
         Ok(())
+    }
+
+    fn spend_bytes(&mut self, n: usize) -> Result<(), KiwiError> {
+        self.byte_budget = self.byte_budget.checked_sub(n).ok_or_else(|| KiwiError("message: decoded values exceed the byte budget".into()))?;
+        Ok(())
+    }
+
+    fn spend_items<T>(&mut self, n: usize) -> Result<(), KiwiError> {
+        let bytes = n.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| KiwiError("message: allocation is too large".into()))?;
+        self.spend_bytes(bytes)
+    }
+
+    // Dry accounting mirrors def/field/value below and never constructs decoded values.
+    fn measure_def(&mut self, i: usize, value: &Kv<'_>, depth: usize) -> Result<(), KiwiError> {
+        if depth > MAX_DEPTH {
+            return err("message: nested too deeply");
+        }
+        self.spend(1)?;
+        let schema = self.schema;
+        let definition = schema.defs.get(i).ok_or_else(|| KiwiError("message: missing definition".into()))?;
+        match definition.kind {
+            Kind::Enum => Ok(()),
+            Kind::Struct => {
+                self.spend_items::<(&str, Kv<'s>)>(definition.fields.len())?;
+                for field in &definition.fields {
+                    let value = value.get(&field.name).ok_or_else(|| KiwiError("encode: struct field is missing during budget check".into()))?;
+                    self.measure_field(field, value, depth)?;
+                }
+                Ok(())
+            }
+            Kind::Message => {
+                let Kv::Object(fields) = value else { return err("encode: message needs an object during budget check") };
+                for (name, value) in fields {
+                    let field = definition
+                        .fields
+                        .iter()
+                        .find(|field| field.name == *name)
+                        .ok_or_else(|| KiwiError("encode: unknown field during budget check".into()))?;
+                    self.spend_items::<(&str, Kv<'s>)>(1)?;
+                    self.measure_field(field, value, depth)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn measure_field(&mut self, field: &Field, value: &Kv<'_>, depth: usize) -> Result<(), KiwiError> {
+        let ty = field.ty.ok_or_else(|| KiwiError("message: untyped field".into()))?;
+        if !field.array {
+            return self.measure_value(ty, value, depth);
+        }
+        if ty == Type::Byte {
+            let count = match value {
+                Kv::Bytes(bytes) => bytes.len(),
+                Kv::Array(values) => values.len(),
+                _ => return err("encode: byte array needs a list during budget check"),
+            };
+            self.spend(1)?;
+            return self.spend_bytes(count);
+        }
+        let Kv::Array(values) = value else { return err("encode: array needs a list during budget check") };
+        self.spend(values.len())?;
+        self.spend_items::<Kv<'s>>(values.len())?;
+        for value in values {
+            self.measure_value(ty, value, depth)?;
+        }
+        Ok(())
+    }
+
+    fn measure_value(&mut self, ty: Type, value: &Kv<'_>, depth: usize) -> Result<(), KiwiError> {
+        match ty {
+            Type::Def(i) => self.measure_def(i, value, depth + 1),
+            Type::Str => {
+                let text = value.str().ok_or_else(|| KiwiError("encode: string needs text during budget check".into()))?;
+                // The encoder drops embedded NULs; valid Rust UTF-8 cannot expand on decoding.
+                self.spend_bytes(text.bytes().filter(|byte| *byte != 0).count())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn def(&mut self, i: usize, depth: usize) -> Result<Kv<'s>, KiwiError> {
@@ -316,6 +438,7 @@ impl<'s> Decoder<'s, '_> {
                 Ok(d.fields.iter().find(|f| f.value == v).map_or(Kv::Uint(u64::from(v)), |f| Kv::Enum(f.name.as_str())))
             }
             Kind::Struct => {
+                self.spend_items::<(&str, Kv<'s>)>(d.fields.len())?;
                 let mut out = Vec::with_capacity(d.fields.len());
                 for f in &d.fields {
                     out.push((f.name.as_str(), self.field(f, depth)?));
@@ -330,6 +453,7 @@ impl<'s> Decoder<'s, '_> {
                         return Ok(Kv::Object(out));
                     }
                     let f = d.fields.iter().find(|f| f.value == id).ok_or_else(|| KiwiError(format!("message: {} has no field {id}", d.name)))?;
+                    self.spend_items::<(&str, Kv<'s>)>(1)?;
                     out.push((f.name.as_str(), self.field(f, depth)?));
                 }
             }
@@ -348,9 +472,11 @@ impl<'s> Decoder<'s, '_> {
         }
         if ty == Type::Byte {
             self.spend(1)?;
+            self.spend_bytes(n)?;
             return Ok(Kv::Bytes(self.r.take(n)?.to_vec()));
         }
         self.spend(n)?;
+        self.spend_items::<Kv<'s>>(n)?;
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             out.push(self.value(ty, depth)?);
@@ -365,7 +491,17 @@ impl<'s> Decoder<'s, '_> {
             Type::Int => Kv::Int(i64::from(self.r.var_int()?)),
             Type::Uint => Kv::Uint(u64::from(self.r.var_uint()?)),
             Type::Float => Kv::Float(self.r.var_float()?),
-            Type::Str => Kv::Str(self.r.string()?),
+            Type::Str => {
+                let bytes = self.r.string_bytes(self.byte_budget)?;
+                // Invalid UTF-8 can expand to three bytes per input byte when replaced.
+                let size = if std::str::from_utf8(bytes).is_ok() {
+                    bytes.len()
+                } else {
+                    bytes.len().checked_mul(3).ok_or_else(|| KiwiError("message: string is too large".into()))?
+                };
+                self.spend_bytes(size)?;
+                Kv::Str(String::from_utf8_lossy(bytes).into_owned())
+            }
             Type::Int64 => Kv::Int(self.r.var_int64()?),
             Type::Uint64 => Kv::Uint(self.r.var_uint64()?),
             Type::Def(i) => self.def(i, depth + 1)?,
@@ -601,5 +737,104 @@ fn numbered(token: &str, default: u32) -> Result<(String, u32), KiwiError> {
     match token.split_once('=') {
         None => Ok((token.to_string(), default)),
         Some((name, n)) => Ok((name.to_string(), n.parse().map_err(|_| KiwiError(format!("schema text: bad number in `{token}`")))?)),
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn decode_with_budget<'s>(schema: &'s Schema, data: &[u8], byte_budget: usize) -> Result<Kv<'s>, KiwiError> {
+        let mut decoder = Decoder { schema, r: Reader { data, pos: 0 }, budget: MAX_VALUES, byte_budget };
+        decoder.def(0, 0)
+    }
+
+    #[test]
+    fn schema_fields_share_a_budget_across_definitions() {
+        let mut writer = encode::Writer::default();
+        writer.var_uint((MAX_SCHEMA_FIELDS / MAX_FIELDS + 1) as u32);
+        for definition in 0..=MAX_SCHEMA_FIELDS / MAX_FIELDS {
+            writer.string("D");
+            writer.byte(2);
+            let fields = if definition == MAX_SCHEMA_FIELDS / MAX_FIELDS { 1 } else { MAX_FIELDS };
+            writer.var_uint(fields as u32);
+            for _ in 0..fields {
+                writer.string("f");
+                writer.var_int(!3);
+                writer.byte(0);
+                writer.var_uint(1);
+            }
+        }
+        assert!(Schema::decode(&writer.0).unwrap_err().0.contains("total fields"));
+    }
+
+    #[test]
+    fn schema_names_are_capped_before_copying() {
+        let mut writer = encode::Writer::default();
+        writer.var_uint(1);
+        writer.string(&"x".repeat(MAX_SCHEMA_NAME + 1));
+        writer.byte(2);
+        writer.var_uint(0);
+        assert!(Schema::decode(&writer.0).is_err());
+        let mut reader = Reader { data: b"abc\0", pos: 0 };
+        let mut budget = 2;
+        assert!(reader.schema_string(&mut budget).is_err(), "names also share a total budget");
+        let mut reader = Reader { data: &[0xff, 0], pos: 0 };
+        assert!(reader.schema_string(&mut budget).is_err(), "UTF-8 replacement is charged before copying");
+    }
+
+    #[test]
+    fn value_arrays_cannot_allocate_past_the_byte_budget() {
+        let schema = Schema::parse("message Message bool[] values").unwrap();
+        let cell = std::mem::size_of::<Kv<'_>>();
+        let field = std::mem::size_of::<(&str, Kv<'_>)>();
+        let data = [1, 4, 0, 0, 0, 0, 0];
+        assert!(decode_with_budget(&schema, &data, field + 3 * cell).unwrap_err().0.contains("byte budget"));
+        assert!(decode_with_budget(&schema, &data, field + 4 * cell).is_ok());
+    }
+
+    #[test]
+    fn repeated_scalar_fields_are_also_charged_to_the_budget() {
+        let schema = Schema::parse("message Message bool value").unwrap();
+        let field = std::mem::size_of::<(&str, Kv<'_>)>();
+        assert!(decode_with_budget(&schema, &[1, 0, 1, 0, 1, 0, 0], 2 * field).unwrap_err().0.contains("byte budget"));
+    }
+
+    #[test]
+    fn blobs_and_lossy_strings_are_capped_before_copying() {
+        let field = std::mem::size_of::<(&str, Kv<'_>)>();
+        let schema = Schema::parse("message Message byte[] values").unwrap();
+        assert!(decode_with_budget(&schema, &[1, 3, 1, 2, 3, 0], field + 2).is_err());
+        assert!(decode_with_budget(&schema, &[1, 3, 1, 2, 3, 0], field + 3).is_ok());
+        let schema = Schema::parse("message Message string value").unwrap();
+        assert!(decode_with_budget(&schema, &[1, 0xff, 0, 0], field + 2).is_err());
+        assert!(decode_with_budget(&schema, &[1, 0xff, 0, 0], field + 3).is_ok());
+    }
+
+    #[test]
+    fn import_decode_budget_has_minimum_scaling_hard_max_and_saturates() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(import_decode_budget(0), 256 * MIB);
+        assert_eq!(import_decode_budget(16 * MIB), 256 * MIB);
+        assert_eq!(import_decode_budget(17 * MIB), 272 * MIB);
+        assert_eq!(import_decode_budget(50 * MIB), 800 * MIB);
+        assert_eq!(import_decode_budget(64 * MIB), MAX_IMPORT_DECODE_BYTES);
+        assert_eq!(import_decode_budget(usize::MAX), MAX_IMPORT_DECODE_BYTES);
+    }
+
+    #[test]
+    fn scaled_import_budget_admits_values_rejected_by_scaled_legacy_limit() {
+        let schema = Schema::parse("message Message string[] values").unwrap();
+        let mut data = vec![1, 100];
+        for _ in 0..100 {
+            data.extend(std::iter::repeat_n(b'x', 100));
+            data.push(0);
+        }
+        data.push(0);
+        // Scale down the production floor and cap while exercising the same budget function.
+        let old_budget = decode_budget(data.len(), 256, 256);
+        let scaled_budget = decode_budget(data.len(), 256, 1024 * 1024);
+        assert!(decode_with_budget(&schema, &data, old_budget).unwrap_err().0.contains("byte budget"));
+        assert!(decode_with_budget(&schema, &data, scaled_budget).is_ok());
     }
 }

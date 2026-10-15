@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::FigApp;
 use crate::colorpicker::PickerTarget;
-use crate::dialogs::{floating, tab_strip, window};
+use crate::dialogs::{card, floating, tab_strip};
 use crate::i18n::{tr, trf};
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{self, FieldEdit, Lead};
@@ -202,14 +202,16 @@ fn panel_windows(app: &mut FigApp, ctx: &Context) {
     for (i, open) in app.session.plugins.panels.iter().enumerate() {
         let id = open.manifest.id.as_str();
         let mut keep = true;
+        let mut closed = false;
         let mut used = None;
         // Side by side leftwards from the properties panel, three to a row.
         let at = egui::pos2(right - PANEL_STEP * (i % 3) as f32, 52.0 + 28.0 * (i / 3) as f32);
         floating(open.title(), ctx).id(Id::new(("plugin_panel", id))).pivot(Align2::RIGHT_TOP).default_pos(at).open(&mut keep).show(ctx, |ui| {
             ui.set_width(320.0);
+            closed = crate::dialogs::header(ui, open.title());
             used = controls(ui, id, &open.panel.controls, &open.values, &t);
         });
-        if !keep {
+        if !keep || closed {
             actions.push((id.to_string(), None));
         } else if used.is_some() {
             actions.push((id.to_string(), used));
@@ -246,11 +248,9 @@ const ROW_TEXT_W: f32 = 300.0;
 
 fn manage_window(app: &mut FigApp, ctx: &Context) {
     let t = Tokens::get(ctx);
-    let mut open = true;
     let mut asked = None;
     let mut tab = app.ui.plugins_manage.tab;
-    window(tr("Plugins"), ctx).id(Id::new("Plugins")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(MANAGE_W);
+    let ((), close) = card(Id::new("Plugins"), tr("Plugins"), MANAGE_W, ctx, |ui| {
         tab_strip(ui, &t, &PluginsTab::ALL, PluginsTab::label, &mut tab);
         ui.add_space(12.0);
         asked = match tab {
@@ -258,6 +258,7 @@ fn manage_window(app: &mut FigApp, ctx: &Context) {
             PluginsTab::Browse => browse_tab(app, ui, &t),
         };
     });
+    let open = !close;
     app.ui.plugins_manage.tab = tab;
     app.ui.plugins_window = open;
     match asked {
@@ -430,9 +431,8 @@ fn confirm_window(app: &mut FigApp, ctx: &Context, t: &Tokens) {
     let update = installed_version(&app.session, &e.id).is_some();
     let installing = app.session.waiting_for(INSTALL);
     let title = if update { tr("Update plugin") } else { tr("Install plugin") };
-    let (mut open, mut install, mut cancel) = (true, false, false);
-    window(title, ctx).id(Id::new("plugin_install_confirm")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(340.0);
+    let (mut install, mut cancel) = (false, false);
+    let ((), close) = card(Id::new("plugin_install_confirm"), title, 340.0, ctx, |ui| {
         ui.label(RichText::new(format!("{} {}", e.name, e.version)).font(semibold(13.0)).color(t.text));
         widgets::label(ui, &trf("From {server}", &[("server", &server)]), t.text_secondary);
         ui.add_space(10.0);
@@ -457,8 +457,7 @@ fn confirm_window(app: &mut FigApp, ctx: &Context, t: &Tokens) {
         );
         ui.add_space(4.0);
         widgets::label(ui, &trf("SHA-256: {sha}…", &[("sha", &e.sha256.get(..16).unwrap_or_default())]), t.text_secondary);
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        crate::dialogs::footer(ui, |ui| {
             if installing {
                 widgets::label(ui, tr("Installing…"), t.text_secondary);
             } else {
@@ -467,7 +466,7 @@ fn confirm_window(app: &mut FigApp, ctx: &Context, t: &Tokens) {
             cancel = widgets::button(ui, tr("Cancel"), false, true).clicked();
         });
     });
-    if !open || cancel {
+    if close || cancel {
         app.cancel_background(INSTALL);
         app.ui.plugins_manage.confirm = None;
     }
@@ -522,14 +521,12 @@ fn form_window(app: &mut FigApp, ctx: &Context) {
         return;
     };
     let t = Tokens::get(ctx);
-    let mut open = true;
     let mut submit = false;
     let mut cancel = false;
     let mut pick = None;
     let label = command.label.trim_end_matches(['…', '.']).trim();
     let title = if label.contains(name.as_str()) { label.to_string() } else { format!("{name}: {label}") };
-    window(&title, ctx).id(Id::new("plugin_form")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(320.0);
+    let ((), close) = card(Id::new("plugin_form"), &title, 320.0, ctx, |ui| {
         match controls(ui, &format!("{}/{}", form.id, form.command), &command.params, &form.values, &t) {
             Some(Used::Set(name, v)) => {
                 form.values.insert(name, v);
@@ -537,13 +534,12 @@ fn form_window(app: &mut FigApp, ctx: &Context) {
             Some(Used::Pick(control)) => pick = Some(control),
             None => {}
         }
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        crate::dialogs::footer(ui, |ui| {
             submit = widgets::button(ui, tr("Run"), true, true).clicked();
             cancel = widgets::button(ui, tr("Cancel"), false, true).clicked();
         });
     });
-    app.ui.plugin_form = (open && !submit && !cancel).then_some(form.clone());
+    app.ui.plugin_form = (!close && !submit && !cancel).then_some(form.clone());
     if let Some(control) = pick {
         app.ui.picker = Some(PickerTarget::PluginField { plugin: form.id.clone(), control, pending: None });
     }

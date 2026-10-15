@@ -194,12 +194,25 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)
 }
 
+/// Native Save as filters; other callers keep their existing combined filter.
+fn save_filters<'a>(exts: &'a [&'a str]) -> Vec<(&'static str, &'a [&'a str])> {
+    if exts == ["figcraft", "fig"] {
+        vec![("FigCraft (.figcraft)", &exts[..1]), (figcraft_ui_egui::i18n::tr("Figma (.fig)"), &exts[1..])]
+    } else {
+        vec![("File", exts)]
+    }
+}
+
 impl Services for Desktop {
     fn pick_open(&mut self, title: &str, exts: &[&str]) -> Option<PathBuf> {
         rfd::FileDialog::new().set_title(title).add_filter("Supported files", exts).pick_file()
     }
     fn pick_save(&mut self, title: &str, name: &str, exts: &[&str]) -> Option<PathBuf> {
-        rfd::FileDialog::new().set_title(title).set_file_name(name).add_filter("File", exts).save_file()
+        let mut dialog = rfd::FileDialog::new().set_title(title).set_file_name(name);
+        for (label, extensions) in save_filters(exts) {
+            dialog = dialog.add_filter(label, extensions);
+        }
+        dialog.save_file()
     }
     fn pick_folder(&mut self, title: &str) -> Option<PathBuf> {
         rfd::FileDialog::new().set_title(title).pick_folder()
@@ -265,4 +278,22 @@ pub fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width: w, height: h })
+}
+
+#[cfg(test)]
+mod save_filter_tests {
+    use super::save_filters;
+
+    #[test]
+    fn native_and_fig_save_filters_are_separate_with_native_first() {
+        let extensions = ["figcraft", "fig"];
+        assert_eq!(save_filters(&extensions), vec![("FigCraft (.figcraft)", &extensions[..1]), ("Figma (.fig)", &extensions[1..])]);
+    }
+
+    #[test]
+    fn other_save_filters_keep_one_combined_group() {
+        for extensions in [&["figcraft"][..], &["fig"][..], &["png"][..], &["png", "jpg", "webp"][..], &[][..]] {
+            assert_eq!(save_filters(extensions), vec![("File", extensions)]);
+        }
+    }
 }

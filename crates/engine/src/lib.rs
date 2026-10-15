@@ -346,7 +346,8 @@ pub struct VersionPreview {
 /// Why edits are refused while a version is shown.
 pub const PREVIEW_READ_ONLY: &str = "you're viewing an earlier version: restore it or go back to the current version to edit";
 
-/// Commands that first end a version preview: they act on the document itself.
+/// Commands that first end a version preview: they act on the document itself. Saving does so
+/// only with a native destination; export copies and pending format choices keep the preview.
 const ENDS_PREVIEW: &[&str] = &["file.save", "file.saveAs", "file.close", "file.revert", "file.saveVersion", "file.duplicate", "version.restore"];
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -357,6 +358,8 @@ impl DocState {
             doc.repair();
         }
         doc.link_layer_text_styles();
+        cmd::styles::apply_paint_bindings_on_load(&mut doc);
+        // Initial import settlement belongs to the saved baseline, not the user's first edit.
         let page = doc.current_page.filter(|p| doc.pages.contains(p)).or_else(|| doc.first_page()).unwrap_or(NodeId(0));
         let doc = Arc::new(doc);
         let mut st = Self {
@@ -692,6 +695,32 @@ impl Default for Session {
     }
 }
 
+/// Batch wrappers must not put an imported Base64 payload back into the command log.
+fn command_contains_import_bytes(id: &str, params: &Value) -> bool {
+    let has_bytes = |id: &str, params: &Value| {
+        matches!(id, "file.open" | "file.import") && ["data", "images"].iter().any(|key| params::get(params, key).is_some())
+    };
+    if id != "command.batch" {
+        return has_bytes(id, params);
+    }
+    let mut pending = vec![(id, params)];
+    while let Some((id, params)) = pending.pop() {
+        if has_bytes(id, params) {
+            return true;
+        }
+        if id == "command.batch"
+            && let Some(commands) = params.get("commands").and_then(Value::as_array)
+        {
+            for command in commands {
+                if let (Some(id), Some(params)) = (command.get("command").and_then(Value::as_str), command.get("params")) {
+                    pending.push((id, params));
+                }
+            }
+        }
+    }
+    false
+}
+
 impl Session {
     /// A session with one new document.
     pub fn new() -> Self {
@@ -816,24 +845,58 @@ impl Session {
         // Every other command acts on the document itself, not on a live text preview.
         textpreview::end(self);
         if ENDS_PREVIEW.contains(&id)
+            && (!matches!(id, "file.save" | "file.saveAs") || cmd::file::save_ends_preview(self, id, params))
             && let Ok(ds) = self.ds_mut()
         {
             ds.end_preview();
         }
         let before = self.ds().ok().map(|d| (d.doc.clone(), d.selection.clone(), d.page, d.uid));
-        let result = guard::run(id, || (spec.run)(self, params))
-            .and_then(|v| self.check_instance_structure(id, &before).map(|()| v))
+        let history_before = if matches!(id, "edit.undo" | "edit.redo") {
+            self.ds().ok().filter(|ds| !self.live_doc(ds.uid)).map(|ds| (ds.uid, ds.history.clone(), ds.revision))
+        } else {
+            None
+        };
+        let expected_history_doc = before
+            .as_ref()
+            .and_then(|(_, _, _, uid)| {
+                history_before.as_ref().and_then(|(history_uid, history, _)| {
+                    (*uid == *history_uid).then(|| match id {
+                        "edit.undo" => history.undo.last(),
+                        "edit.redo" => history.redo.last(),
+                        _ => None,
+                    })
+                })
+            })
+            .flatten()
+            .map(|entry| entry.doc.clone());
+        let run_result = guard::run(id, || (spec.run)(self, params));
+        let restored_history = run_result.is_ok()
+            && before.as_ref().is_some_and(|(_, _, _, uid)| {
+                expected_history_doc
+                    .as_ref()
+                    .is_some_and(|expected| self.docs.iter().find(|ds| ds.uid == *uid).is_some_and(|ds| Arc::ptr_eq(&ds.doc, expected)))
+            });
+        let result = run_result
+            .and_then(|v| self.check_instance_structure_with_history(id, &before, restored_history).map(|()| v))
             .and_then(|v| self.check_preview(id, &before).map(|()| v))
             .and_then(|v| self.check_live_access(id, &before).map(|()| v));
         match &result {
             Ok(_) => {
-                self.after_command(spec, before);
+                self.after_command(spec, before, restored_history);
+                // Imported bytes already live in the document. Keeping a Base64 copy for the
+                // journal or for "Repeat" would retain hundreds of megabytes after tabs are closed,
+                // and repeating would silently import the whole file again: byte imports are
+                // neither journaled nor repeatable.
+                let byte_import = command_contains_import_bytes(id, params);
+                // Repeating an action must keep that action, not replace it with a recursive repeat.
                 if spec.history && id != "edit.repeat" {
-                    self.last_command = Some((id.to_string(), params.clone()));
+                    self.last_command = if byte_import { None } else { Some((id.to_string(), params.clone())) };
                 }
-                self.journal.push((id.to_string(), params.clone()));
-                if self.journal.len() > 5000 {
-                    self.journal.drain(..1000);
+                if !byte_import {
+                    self.journal.push((id.to_string(), params.clone()));
+                    if self.journal.len() > 5000 {
+                        self.journal.drain(..1000);
+                    }
                 }
             }
             Err(_) => {
@@ -845,6 +908,10 @@ impl Session {
                     ds.doc = doc;
                     ds.selection = sel;
                     ds.page = page;
+                    if let Some((_, history, revision)) = history_before.filter(|(history_uid, _, _)| *history_uid == uid) {
+                        ds.history = history;
+                        ds.revision = revision;
+                    }
                 }
             }
         }
@@ -875,9 +942,21 @@ impl Session {
     /// Instances can't gain, lose or reorder layers, nor move, resize or re-constrain the layers in
     /// them, and library copies are read-only: refuse such an edit (it is rolled back).
     fn check_instance_structure(&self, id: &str, before: &Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>) -> Result<()> {
+        self.check_instance_structure_with_history(id, before, false)
+    }
+
+    fn check_instance_structure_with_history(
+        &self,
+        id: &str,
+        before: &Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>,
+        restored_history: bool,
+    ) -> Result<()> {
         let Some((bdoc, _, _, uid)) = before else { return Ok(()) };
         let Some(ds) = self.docs.iter().find(|d| d.uid == *uid) else { return Ok(()) };
         if Arc::ptr_eq(&ds.doc, bdoc) {
+            return Ok(());
+        }
+        if restored_history {
             return Ok(());
         }
         // "Repeat" runs the repeated command.
@@ -892,7 +971,7 @@ impl Session {
     }
 
     /// Bookkeeping after a successful command: normalise what changed, push undo, bump revision.
-    fn after_command(&mut self, spec: &CommandSpec, before: Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>) {
+    fn after_command(&mut self, spec: &CommandSpec, before: Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>, restored_history: bool) {
         let Some((bdoc, bsel, bpage, uid)) = before else {
             if let Ok(ds) = self.ds_mut() {
                 ds.revision += 1;
@@ -901,7 +980,7 @@ impl Session {
         };
         let Some(ds) = self.docs.iter_mut().find(|d| d.uid == uid) else { return };
         let changed = !Arc::ptr_eq(&ds.doc, &bdoc);
-        if changed {
+        if changed && !restored_history {
             normalize(ds.doc_mut(), &bdoc);
         }
         let edit = changed && ds.interaction.is_none();
@@ -1453,6 +1532,8 @@ mod fig_export_assets_tests;
 #[cfg(test)]
 mod fig_export_tests;
 #[cfg(test)]
+mod fig_file_regression_tests;
+#[cfg(test)]
 mod fig_import_tests;
 #[cfg(test)]
 mod frame_guides_tests;
@@ -1554,6 +1635,8 @@ mod rotated_guides_tests;
 mod rotated_select_tests;
 #[cfg(test)]
 mod rotation_origin_tests;
+#[cfg(test)]
+mod save_format_tests;
 #[cfg(test)]
 mod scale_tool_tests;
 #[cfg(test)]

@@ -125,9 +125,11 @@ fn main() -> eframe::Result {
             c.request_repaint();
         }
     }))));
+    let mut import_results = Vec::new();
     for f in &args.files {
-        if let Err(e) = session.execute("file.open", &json!({"path": f})) {
-            log::error!("{f}: {e}");
+        match session.execute("file.open", &json!({"path": f})) {
+            Ok(result) => import_results.push(result),
+            Err(e) => log::error!("{f}: {e}"),
         }
     }
     // Documents a crashed or killed run left unsaved come back; this run keeps its own copies.
@@ -158,6 +160,9 @@ fn main() -> eframe::Result {
         let _ = session.execute("file.new", &json!({}));
     }
     let mut fig = FigApp::new(session, Box::new(svc));
+    for result in import_results {
+        figcraft_ui_egui::import_report::capture(&mut fig, "file.open", &result);
+    }
     fig.ui.home = false;
     fig.note_recovered(recovered.copies);
     if let Some(link) = &args.join {

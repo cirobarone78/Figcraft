@@ -157,22 +157,28 @@ fn themed() -> Document {
 /// ids), wherever they are used.
 fn by_name(doc: &mut Document) {
     let mut ids: BTreeMap<String, String> = BTreeMap::new();
+    let mut modes: BTreeMap<(String, String), String> = BTreeMap::new();
     for c in &doc.variables.collections {
         ids.insert(c.id.clone(), format!("collection {}", c.name));
         for m in &c.modes {
-            ids.insert(m.id.clone(), format!("mode {}/{}", c.name, m.name));
+            modes.insert((c.id.clone(), m.id.clone()), format!("mode {}/{}", c.name, m.name));
         }
     }
     ids.extend(doc.variables.variables.iter().map(|v| (v.id.clone(), format!("variable {}", v.name))));
     ids.extend(doc.styles.iter().map(|s| (s.id.clone(), format!("style {}", s.name))));
     let name = |id: &String| ids.get(id).cloned().unwrap_or_else(|| format!("unknown {id}"));
+    let mode_name = |collection: &String, mode: &String| {
+        modes.get(&(collection.clone(), mode.clone())).cloned().unwrap_or_else(|| format!("unknown {collection}/{mode}"))
+    };
     for c in &mut doc.variables.collections {
+        let collection = c.id.clone();
         c.id = name(&c.id);
         for m in &mut c.modes {
-            m.id = name(&m.id);
+            m.id = mode_name(&collection, &m.id);
         }
     }
     for v in &mut doc.variables.variables {
+        let collection = v.collection.clone();
         (v.id, v.collection) = (name(&v.id), name(&v.collection));
         v.values = std::mem::take(&mut v.values)
             .into_iter()
@@ -181,7 +187,7 @@ fn by_name(doc: &mut Document) {
                     VariableValue::Alias(a) => VariableValue::Alias(name(&a)),
                     other => other,
                 };
-                (name(&m), val)
+                (mode_name(&collection, &m), val)
             })
             .collect();
     }
@@ -194,7 +200,7 @@ fn by_name(doc: &mut Document) {
         for v in n.bound.values_mut() {
             *v = name(v);
         }
-        n.var_modes = std::mem::take(&mut n.var_modes).into_iter().map(|(c, m)| (name(&c), name(&m))).collect();
+        n.var_modes = std::mem::take(&mut n.var_modes).into_iter().map(|(c, m)| (name(&c), mode_name(&c, &m))).collect();
         for r in [&mut n.styles.fill, &mut n.styles.stroke, &mut n.styles.effect, &mut n.styles.grid, &mut n.styles.text] {
             *r = r.as_ref().map(name);
         }
@@ -266,6 +272,54 @@ fn variables_modes_and_bindings_round_trip() {
     assert_eq!(names(&back), names(&doc));
     assert_eq!(back.variables.collections.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Theme", "Spacing"]);
     assert_eq!(back.variables.collections[0].modes.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Light", "Dark"]);
+}
+
+#[test]
+fn mode_names_are_scoped_to_their_collection() {
+    let mut doc = Document::new("Scoped modes");
+    let page = doc.first_page().unwrap();
+    let mode = |id: &str, name: &str| Mode { id: id.into(), name: name.into() };
+    doc.variables.collections = vec![
+        Collection { id: "colors".into(), name: "Colors".into(), modes: vec![mode("1:0", "Light"), mode("1:1", "Dark")], extends: None },
+        Collection {
+            id: "system".into(),
+            name: "System Colors".into(),
+            modes: vec![mode("1:0", "Default"), mode("1:1", "Alternate")],
+            extends: None,
+        },
+    ];
+    doc.variables.variables = vec![
+        var("accent", "accent", "colors", VariableType::Number, &[("1:0", VariableValue::Number(1.0)), ("1:1", VariableValue::Number(2.0))]),
+        var(
+            "system-accent",
+            "system/accent",
+            "system",
+            VariableType::Number,
+            &[("1:0", VariableValue::Number(10.0)), ("1:1", VariableValue::Number(20.0))],
+        ),
+    ];
+    doc.node_mut(page).unwrap().var_modes.extend([("colors".into(), "1:0".into()), ("system".into(), "1:1".into())]);
+    assert!(same_after_round_trip(&doc, "collection-scoped modes").is_empty());
+
+    let mut canonical = doc.clone();
+    by_name(&mut canonical);
+    assert_eq!(canonical.variables.collections[0].modes[0].id, "mode Colors/Light");
+    assert_eq!(canonical.variables.collections[1].modes[0].id, "mode System Colors/Default");
+    assert_eq!(canonical.variables.variables[0].values["mode Colors/Light"], VariableValue::Number(1.0));
+    assert_eq!(canonical.variables.variables[1].values["mode System Colors/Default"], VariableValue::Number(10.0));
+    assert_eq!(canonical.node(page).unwrap().var_modes["collection Colors"], "mode Colors/Light");
+    assert_eq!(canonical.node(page).unwrap().var_modes["collection System Colors"], "mode System Colors/Alternate");
+
+    // Canonicalization still exposes a changed mode choice and a value moved to another mode.
+    let mut changed_choice = doc.clone();
+    changed_choice.node_mut(page).unwrap().var_modes.insert("colors".into(), "1:1".into());
+    by_name(&mut changed_choice);
+    assert_ne!(json!(canonical.node(page).unwrap().var_modes), json!(changed_choice.node(page).unwrap().var_modes));
+    let mut changed_values = doc;
+    changed_values.variables.variables[0].values.insert("1:0".into(), VariableValue::Number(2.0));
+    changed_values.variables.variables[0].values.insert("1:1".into(), VariableValue::Number(1.0));
+    by_name(&mut changed_values);
+    assert_ne!(json!(canonical.variables.variables[0].values), json!(changed_values.variables.variables[0].values));
 }
 
 #[test]
@@ -849,6 +903,8 @@ fn scramble(v: &mut Kv, r: &mut Lcg) {
 fn damaged_variables_styles_and_instances_never_panic() {
     let docs = [themed(), styled(), sized().0];
     let mut read = 0;
+    let mut written = 0;
+    let mut rejected = 0;
     for (d, doc) in docs.iter().enumerate() {
         let (bytes, _) = export(doc, None).unwrap();
         let (schema, message) = decode_canvas(&Archive::open(&bytes).unwrap().canvas).unwrap();
@@ -868,12 +924,33 @@ fn damaged_variables_styles_and_instances_never_panic() {
             }
             if let Ok((back, _)) = import(&canvas, "x") {
                 read += 1;
-                // What came back can be written again.
-                export(&back, None).unwrap();
+                // Damaged instance structure could hit an explicit loss-prevention guard (counted
+                // below). Damaged private property records never fail an export: they are left
+                // out with a warning. Any other export error is a failure; output must open again.
+                match export(&back, None) {
+                    Ok((bytes, _)) => {
+                        written += 1;
+                        import(&bytes, "x").unwrap();
+                    }
+                    Err(crate::FormatError::Io(problem))
+                        if matches!(
+                            problem.as_str(),
+                            ".fig export: a nested instance has no unambiguous source layer"
+                                | ".fig export: nested instance type changes with children are not supported"
+                        ) =>
+                    {
+                        rejected += 1;
+                    }
+                    Err(problem) => panic!("unexpected damaged-file export error: {problem}"),
+                }
             }
         }
     }
     assert!(read > 100, "only {read} damaged files were read");
+    // The seeds are fixed and none of these damaged files reaches a structural guard today: any
+    // rejection is a regression to investigate, not noise to tolerate.
+    assert_eq!(rejected, 0, "{rejected} of {read} damaged files hit an export guard");
+    assert_eq!(written, read);
 }
 
 #[test]
@@ -920,7 +997,6 @@ fn local_samples_keep_their_variables_and_styles() {
     for p in crate::fig::tests::samples() {
         let bytes = std::fs::read(&p).unwrap();
         let (mut a, _) = import(&bytes, "sample").unwrap();
-        link(&mut a);
         let (out, warnings) = export(&a, None).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         let (mut b, _) = import(&out, "sample").unwrap_or_else(|e| panic!("{}: {e}", p.display()));
         assert!(!warnings.iter().any(|w| w.contains("variable") || w.contains("style")), "{}: {warnings:?}", p.display());

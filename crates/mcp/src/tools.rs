@@ -94,6 +94,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "export",
     "screenshot",
     "open_file",
+    "import_figma",
     "save_file",
     "undo",
     "redo",
@@ -106,6 +107,15 @@ pub const TOOL_NAMES: &[&str] = &[
 /// All tools, in `tools/list` order.
 pub fn tool_definitions() -> Vec<Value> {
     let empty = || obj(json!({}), &[]);
+    let mut figma = tool(
+        "import_figma",
+        "Import from Figma",
+        "Download a whole Figma Design file from its HTTPS /design/ or /file/ link and open a new unsaved editable document. Native CLI/MCP only; FIGCRAFT_FIGMA_TOKEN in the hosting process environment supplies a personal access token with file_content:read permission. Never send credentials as tool arguments. Returns source fileKey/version, import summary and warnings. Images and local variables are best effort; variables may require Enterprise access. This is a snapshot, without automatic synchronisation.",
+        obj(json!({"url": string("HTTPS Figma Design file link; node selections still import the entire file")}), &["url"]),
+        false,
+    );
+    figma["inputSchema"]["additionalProperties"] = json!(false);
+    figma["annotations"]["openWorldHint"] = json!(true);
     vec![
         tool(
             "list_commands",
@@ -246,11 +256,12 @@ pub fn tool_definitions() -> Vec<Value> {
             ),
             false,
         ),
+        figma,
         tool(
             "save_file",
             "Save file",
-            "Save the active document as a .figcraft file. `path` is required the first time (an untitled document has no path); later saves reuse it.",
-            obj(json!({"path": string("Output .figcraft path")}), &[]),
+            "Save the active document as a .figcraft file. `path` is required the first time (an untitled document has no path); later saves reuse it. An explicit .fig path writes an experimental export copy with warnings and keeps the native destination and unsaved changes.",
+            obj(json!({"path": string("Output .figcraft path, or .fig for an experimental export copy")}), &[]),
             false,
         ),
         tool("undo", "Undo", "Undo the last change (one command, batch or gesture). Returns {undone: bool}.", empty(), false),
@@ -471,6 +482,13 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         "export" => export(b, &a),
         "screenshot" => screenshot(b, &a),
         "open_file" => open_file(b, &a),
+        "import_figma" => {
+            if a.keys().any(|key| key != "url") {
+                Err("import_figma accepts only url; credentials belong in the MCP process environment".into())
+            } else {
+                req_s(&a, "url").and_then(|url| crate::import_figma(b, url)).map(|v| ToolResult::json(&v))
+            }
+        }
         "save_file" => save_file(b, &a),
         "undo" => exec(b, "edit.undo", json!({})).map(|v| ToolResult::json(&v)),
         "redo" => exec(b, "edit.redo", json!({})).map(|v| ToolResult::json(&v)),

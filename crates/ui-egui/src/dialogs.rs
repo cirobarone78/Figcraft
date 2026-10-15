@@ -1,11 +1,13 @@
 //! Dialogs: About, Preferences, keyboard shortcuts, find & replace, rename layers, variables,
 //! export.
 
+use std::path::Path;
+
 use egui::{Align2, Color32, Context, CornerRadius, RichText, Sense, Stroke, vec2};
 use figcraft_color::ColorProfile;
 use figcraft_doc::{ExportFormat, ExportSetting, ExportSize, NodeId};
 use figcraft_engine::cmd::file::{export_jobs, exportable_layers};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::FigApp;
 use crate::export_panel::{export_layers, save_one, suggested_name};
@@ -15,18 +17,67 @@ use crate::theme::{ACCENT, Tokens, regular, semibold};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// A dialog window, centred.
-pub(crate) fn window<'a>(title: &'a str, ctx: &Context) -> egui::Window<'a> {
-    floating(title, ctx).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-}
-
-/// A window styled like the dialogs that the user can move.
+/// A window the user can move (a plugin's panel), styled like the dialog cards: a card like
+/// [`modal`], without egui's title bar (the caller draws [`header`] first, which has the title and
+/// the close button).
 pub(crate) fn floating<'a>(title: &'a str, ctx: &Context) -> egui::Window<'a> {
     let t = Tokens::get(ctx);
     egui::Window::new(title)
+        .title_bar(false)
         .collapsible(false)
         .resizable(false)
-        .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel).inner_margin(egui::Margin::same(20)))
+        .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(20)))
+}
+
+/// A dialog card's header row: the title at the left, a close button at the right. True when the
+/// close button was clicked. Call it after the card's `set_width`, so the row spans that width.
+pub(crate) fn header(ui: &mut egui::Ui, title: &str) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(semibold(13.0)));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = icons::button(ui, Icon::Close, 20.0, false, tr("Close")).clicked();
+        });
+    });
+    ui.add_space(12.0);
+    close
+}
+
+/// A dialog card's footer: buttons right-aligned. Add the primary button first (it ends up
+/// rightmost), then the secondary one.
+pub(crate) fn footer(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+    });
+}
+
+/// A modal card centred on the window over a dimmed backdrop, without a title bar. The caller
+/// closes it (Escape is handled by `keys`, not by the modal itself).
+pub(crate) fn modal(id: egui::Id, ctx: &Context) -> egui::Modal {
+    let t = Tokens::get(ctx);
+    egui::Modal::new(id)
+        .backdrop_color(Color32::from_black_alpha(96))
+        .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(20)))
+}
+
+/// A dialog: a [`modal`] card `width` wide with a [`header`] (the title and a close button) above
+/// `body`. Returns what `body` returned and whether the close button was clicked. Backdrop clicks
+/// don't close it; Escape is left to [`keys`] (or the dialog's own keys).
+pub(crate) fn card<R>(id: egui::Id, title: &str, width: f32, ctx: &Context, body: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
+    let shown = modal(id, ctx).show(ctx, |ui| {
+        ui.set_width(width);
+        let top = ui.cursor().top();
+        ui.label(RichText::new(title).font(semibold(13.0)));
+        ui.add_space(12.0);
+        let result = body(ui);
+        // The close button sits at the card's right edge, which a body wider than `width` moves:
+        // place it once the body has laid out.
+        let rect = egui::Rect::from_min_size(egui::pos2(ui.min_rect().right() - 20.0, top), vec2(20.0, 20.0));
+        let close = icons::button(&mut ui.new_child(egui::UiBuilder::new().max_rect(rect)), Icon::Close, 20.0, false, tr("Close")).clicked();
+        (result, close)
+    });
+    shown.inner
 }
 
 /// The About window's tabs.
@@ -100,21 +151,27 @@ fn about_body(ui: &mut egui::Ui, t: &Tokens) {
 }
 
 /// Escape closes the topmost simple dialog (one without menus of its own), before the canvas's
-/// shortcuts see it (it doesn't deselect), like a system dialog: from one of its fields too.
+/// shortcuts see it (it doesn't deselect), like a system dialog: from one of its fields too. A
+/// running Figma import is cancelled only when it is the topmost dialog (no simple dialog above it).
 pub fn keys(app: &mut FigApp, ctx: &Context) {
-    let u = &mut app.ui;
+    let u = &app.ui;
     let open = u.color_profile.is_some()
         || u.find.is_some()
         || u.batch_rename.is_some()
+        || u.import_report.is_some()
         || u.confirm_close
         || u.export_preview
         || u.shortcuts_panel
         || u.preferences
         || u.about;
+    if !open && crate::figma_import::keys(app, ctx) {
+        return;
+    }
+    let u = &mut app.ui;
     if !open || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         return;
     }
-    if u.color_profile.take().is_some() || u.find.take().is_some() || u.batch_rename.take().is_some() {
+    if u.color_profile.take().is_some() || u.find.take().is_some() || u.batch_rename.take().is_some() || u.import_report.take().is_some() {
         return;
     }
     for flag in [&mut u.confirm_close, &mut u.export_preview, &mut u.shortcuts_panel, &mut u.preferences, &mut u.about] {
@@ -125,11 +182,17 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
 }
 
 pub fn show(app: &mut FigApp, ctx: &Context) {
+    // Dropped files waiting to open: their card, then (once it has shown) the files, so a report
+    // for them shows below.
+    crate::pending_open::pending_opens(app, ctx);
+    crate::import_report::show(app, ctx);
+    crate::figma_import::show(app, ctx);
+    // Cancellation input wins over a response that arrived for this frame. Applying a completed
+    // import at the start of the frame would ignore the Cancel button or Escape pressed then.
+    crate::figma_import::poll(app, ctx);
     let t = Tokens::get(ctx);
     if app.ui.about {
-        let mut open = true;
-        window(tr("About FigCraft"), ctx).open(&mut open).show(ctx, |ui| {
-            ui.set_width(ABOUT_WIDTH);
+        let ((), close) = card(egui::Id::new("About FigCraft"), tr("About FigCraft"), ABOUT_WIDTH, ctx, |ui| {
             tab_strip(ui, &t, &AboutTab::ALL, AboutTab::label, &mut app.ui.about_tab);
             ui.add_space(12.0);
             match app.ui.about_tab {
@@ -138,14 +201,12 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                 AboutTab::Models => crate::credits::models_ui(ui),
             }
         });
-        if !open {
+        if close {
             app.ui.about = false;
         }
     }
     if app.ui.preferences {
-        let mut open = true;
-        window(tr("Preferences"), ctx).open(&mut open).show(ctx, |ui| {
-            ui.set_width(360.0);
+        let ((), close) = card(egui::Id::new("Preferences"), tr("Preferences"), 360.0, ctx, |ui| {
             let prefs = app.session.prefs.clone();
             let mut toggles = vec![];
             for (label, val, cmd) in [
@@ -238,7 +299,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                 crate::widgets::label(ui, &note, t.text_secondary);
             }
         });
-        if !open {
+        if close {
             app.ui.preferences = false;
         }
     }
@@ -349,11 +410,9 @@ fn batch_rename_dialog(app: &mut FigApp, ctx: &Context) {
             .collect(),
         _ => Vec::new(),
     };
-    let mut open = true;
     let mut cancel = false;
     let mut apply = false;
-    window(tr("Rename layers"), ctx).id(egui::Id::new("Rename layers")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(320.0);
+    let ((), close) = card(egui::Id::new("Rename layers"), tr("Rename layers"), 320.0, ctx, |ui| {
         ui.label(RichText::new(trn("{n} layers", n, &[])).color(t.text_secondary));
         ui.add_space(6.0);
         ui.add(egui::TextEdit::singleline(&mut b.find).hint_text(tr("Match (empty: the whole name)")).desired_width(300.0));
@@ -391,17 +450,16 @@ fn batch_rename_dialog(app: &mut FigApp, ctx: &Context) {
                 }
             }
         }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            cancel = crate::widgets::button(ui, tr("Cancel"), false, true).clicked();
+        footer(ui, |ui| {
             let enter = to.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             apply = (crate::widgets::button(ui, tr("Rename"), true, ready).clicked() || enter) && ready;
+            cancel = crate::widgets::button(ui, tr("Cancel"), false, true).clicked();
         });
     });
     if apply {
         app.run("object.batchRename", batch_rename_params(&b));
     }
-    app.ui.batch_rename = (open && !cancel && !apply).then_some(b);
+    app.ui.batch_rename = (!close && !cancel && !apply).then_some(b);
 }
 
 /// File ▸ Color profile: pick sRGB or Display P3, then keep the colours' appearance (convert the
@@ -413,10 +471,8 @@ fn color_profile_dialog(app: &mut FigApp, ctx: &Context) {
         return;
     };
     let t = Tokens::get(ctx);
-    let mut open = true;
     let mut apply = None;
-    window(tr("Color profile"), ctx).open(&mut open).show(ctx, |ui| {
-        ui.set_width(340.0);
+    let ((), close) = card(egui::Id::new("Color profile"), tr("Color profile"), 340.0, ctx, |ui| {
         ui.label(RichText::new(tr("Color values in this file are in this color space.")).color(t.text_secondary).font(regular(11.0)));
         ui.add_space(8.0);
         for p in ColorProfile::ALL {
@@ -445,8 +501,7 @@ fn color_profile_dialog(app: &mut FigApp, ctx: &Context) {
                     .font(regular(11.0)),
             );
         }
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        footer(ui, |ui| {
             if crate::widgets::button(ui, tr("Keep appearance"), true, true).clicked() {
                 apply = Some(true);
             }
@@ -455,23 +510,41 @@ fn color_profile_dialog(app: &mut FigApp, ctx: &Context) {
             }
         });
     });
-    app.ui.color_profile = open.then_some(chosen);
+    app.ui.color_profile = (!close).then_some(chosen);
     if let Some(convert) = apply {
         app.run("file.colorProfile", json!({"profile": chosen.id(), "convert": convert}));
         app.ui.color_profile = None;
     }
 }
 
+/// A `.fig` Save as result is an export; only native saves report that the document was saved.
+pub(crate) fn file_saved(app: &mut FigApp, result: &Value) {
+    if result["format"] == "fig" {
+        fig_exported(app, result);
+    } else {
+        app.toast(trf("Saved {name}", &[("name", &result_file_name(result))]));
+    }
+}
+
+fn result_file_name(result: &Value) -> String {
+    result["path"].as_str().and_then(|p| Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// The `.fig` result stays an export: native save state is unchanged, and omissions are reported.
+pub(crate) fn fig_exported(app: &mut FigApp, result: &Value) {
+    let file = result_file_name(result);
+    let left_out = result["warnings"].as_array().map_or(0, Vec::len);
+    app.toast(match left_out {
+        0 => trf("Exported {name}", &[("name", &file)]),
+        n => trn("Exported {name}; {n} kinds of content were left out", n, &[("name", &file)]),
+    });
+}
+
 /// Save the whole file as `.fig`; the toast says how much was left out.
 fn save_fig(app: &mut FigApp, name: &str) {
     let Some(p) = app.services.pick_save(tr("Export"), &format!("{name}.fig"), &["fig"]) else { return };
-    let file = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
     if let Some(r) = app.run("file.export", json!({"format": "fig", "path": p.to_string_lossy()})) {
-        let left_out = r["warnings"].as_array().map_or(0, Vec::len);
-        app.toast(match left_out {
-            0 => trf("Exported {name}", &[("name", &file)]),
-            n => trn("Exported {name}; {n} kinds of content were left out", n, &[("name", &file)]),
-        });
+        fig_exported(app, &r);
     }
 }
 
@@ -489,7 +562,6 @@ enum ExportChoice {
 /// the selection (or the page) as one file.
 fn export_dialog(app: &mut FigApp, ctx: &Context) {
     let t = Tokens::get(ctx);
-    let mut open = true;
     let sel = app.session.selection();
     let Ok(ds) = app.session.ds() else {
         app.ui.export_preview = false;
@@ -512,8 +584,7 @@ fn export_dialog(app: &mut FigApp, ctx: &Context) {
         preset(1.0, ExportFormat::Pdf),
     ];
     let mut choice = None;
-    window(tr("Export"), ctx).open(&mut open).show(ctx, |ui| {
-        ui.set_width(320.0);
+    let ((), closed) = card(egui::Id::new("Export"), tr("Export"), 320.0, ctx, |ui| {
         let caption = |ui: &mut egui::Ui, s: &str| {
             ui.label(RichText::new(s).font(regular(11.0)).color(t.text_secondary));
         };
@@ -565,12 +636,12 @@ fn export_dialog(app: &mut FigApp, ctx: &Context) {
         divider(ui);
         caption(ui, tr("The whole file"));
         ui.add_space(4.0);
-        if row(ui, tr(".fig (experimental)")) {
+        if row(ui, tr("Figma (.fig)")) {
             choice = Some(ExportChoice::Fig);
         }
         caption(ui, tr("Other apps may not open every .fig file exported here."));
     });
-    let close = choice.is_some() || !open;
+    let close = choice.is_some() || closed;
     match choice {
         Some(ExportChoice::Layers) => export_layers(app, &with_settings, false),
         Some(ExportChoice::Once(s)) if !ids.is_empty() => save_one(app, &ids, &s, &suggested_name(&doc, &ids, &s, "Export")),

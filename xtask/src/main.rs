@@ -71,6 +71,8 @@ fn wasm() -> bool {
         "-p",
         "figcraft-collab-net",
         "-p",
+        "figcraft-figma-net",
+        "-p",
         "figcraft-engine",
         "-p",
         "figcraft-ui-egui",

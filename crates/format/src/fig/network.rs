@@ -65,7 +65,14 @@ impl Reader<'_> {
 }
 
 /// The network in blob `b`; `None` when it's truncated, out of range or not finite.
+#[cfg(test)]
 pub(super) fn decode(b: &[u8]) -> Option<Network> {
+    decode_styled(b).map(|(net, _)| net)
+}
+
+/// The network in blob `b` and how many of its segments have a style id of their own (per-segment
+/// stroke overrides, which the document model can't hold); `None` as for `decode`.
+pub(super) fn decode_styled(b: &[u8]) -> Option<(Network, usize)> {
     let mut r = Reader { b, pos: 0 };
     let (nv, ns, nr) = (r.u32()? as usize, r.u32()? as usize, r.u32()? as usize);
     if nv > MAX_ITEMS || ns > MAX_ITEMS || nr > MAX_ITEMS || nv * 12 + ns * 28 + nr * 8 > b.len().saturating_sub(12) {
@@ -75,8 +82,11 @@ pub(super) fn decode(b: &[u8]) -> Option<Network> {
     for _ in 0..nv {
         net.vertices.push(Vertex { style: r.u32()?, x: r.f32()?, y: r.f32()? });
     }
+    let mut styled = 0usize;
     for _ in 0..ns {
-        r.u32()?;
+        if r.u32()? != 0 {
+            styled += 1;
+        }
         net.segments.push(Segment { a: r.index(nv)?, ta: (r.f32()?, r.f32()?), b: r.index(nv)?, tb: (r.f32()?, r.f32()?) });
     }
     let mut entries = 0usize;
@@ -93,7 +103,7 @@ pub(super) fn decode(b: &[u8]) -> Option<Network> {
         }
         net.regions.push(Region { style: sw >> 1, non_zero: sw & 1 == 1, loops });
     }
-    Some(net)
+    Some((net, styled))
 }
 
 /// The blob of `net` (the export writes it; so do test fixtures). Callers pass finite values.

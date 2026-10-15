@@ -530,6 +530,7 @@ pub fn end(app: &mut FigApp, ctx: &Context) {
 fn blocked(app: &FigApp) -> bool {
     let u = &app.ui;
     u.palette.is_some()
+        || crate::figma_import::is_open(app)
         || u.about
         || u.preferences
         || u.variables.is_some()
