@@ -270,6 +270,8 @@ pub struct Presenter {
     anim_tex: Option<egui::TextureHandle>,
     temp: Option<Temp>,
     textures: HashMap<NodeId, FrameTex>,
+    /// Small current-screen preview in the full-window bar, cached until its content changes.
+    bar_thumb: Option<(NodeId, usize, egui::TextureHandle)>,
     arrived: f64,
     delays_fired: HashSet<(NodeId, usize)>,
     /// Mouse triggers waiting out their delay.
@@ -348,6 +350,7 @@ impl Presenter {
             anim_tex: None,
             temp: None,
             textures: HashMap::new(),
+            bar_thumb: None,
             arrived: -1.0,
             delays_fired: HashSet::new(),
             waiting: Vec::new(),
@@ -1651,6 +1654,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
         action = player(&mut pres, ui, ui.max_rect(), now, Chrome { keys: !typing, ..FULL }).or(action);
     });
+    let picked_device = navigation_bar(&mut pres, &ctx, now);
     // Keys the prototype left alone: C shows the comments, F fills the screen.
     if !typing {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
@@ -1679,10 +1683,121 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
     if let Some(BarAction::Responsive(on)) = action {
         app.run("proto.settings", json!({"responsive": on}));
     }
+    if let Some(device) = picked_device {
+        app.run("proto.settings", json!({"device": device}));
+    }
     if action == Some(BarAction::Close) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.ui.present_uid = None;
         return;
     }
     app.ui.present = Some(pres);
+}
+
+/// Controls that stay in reach while viewing a prototype, including screen stepping, device and
+/// scale. The selected device is returned to the caller so it can go through the normal document
+/// command (and undo/save) rather than changing only the player's copy.
+fn navigation_bar(p: &mut Presenter, ctx: &egui::Context, now: f64) -> Option<String> {
+    let t = Tokens::get(ctx);
+    let doc = p.doc.as_ref()?;
+    let frames = doc.top_frames(doc.page_of(p.current).unwrap_or(p.current));
+    let index = frames.iter().position(|id| *id == p.current);
+    let settings = page_settings(doc, p.current);
+    let mut navigate = None;
+    let mut device_choice = None;
+    egui::Area::new(Id::new("present_navigation")).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -18.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+        egui::Frame::NONE
+            .fill(t.panel)
+            .stroke(Stroke::new(1.0, t.border))
+            .corner_radius(CornerRadius::same(9))
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let prev = index.and_then(|i| i.checked_sub(1)).and_then(|i| frames.get(i)).copied();
+                    let next = index.and_then(|i| frames.get(i + 1)).copied();
+                    let previous =
+                        ui.add_enabled(prev.is_some(), egui::Button::new("").min_size(vec2(26.0, 24.0))).on_hover_text(tr("Previous frame"));
+                    icons::paint(
+                        ui.painter(),
+                        Rect::from_center_size(previous.rect.center(), vec2(21.0, 21.0)),
+                        Icon::ChevronLeft,
+                        if prev.is_some() { t.icon } else { t.icon_secondary },
+                    );
+                    if previous.clicked() {
+                        navigate = prev;
+                    }
+                    ui.label(egui::RichText::new(format!("{} / {}", index.map_or(0, |i| i + 1), frames.len())).color(t.text));
+                    let following = ui.add_enabled(next.is_some(), egui::Button::new("").min_size(vec2(26.0, 24.0))).on_hover_text(tr("Next frame"));
+                    icons::paint(
+                        ui.painter(),
+                        Rect::from_center_size(following.rect.center(), vec2(21.0, 21.0)),
+                        Icon::ChevronRight,
+                        if next.is_some() { t.icon } else { t.icon_secondary },
+                    );
+                    if following.clicked() {
+                        navigate = next;
+                    }
+                    ui.separator();
+                    let model = if settings.device.is_empty() || settings.device == "None" { tr("No device") } else { &settings.device };
+                    let device_menu = ui.menu_button(format!("{model}    "), |ui| {
+                        navigation_menu(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(410.0).show(ui, |ui| {
+                                if ui.selectable_label(settings.device.is_empty() || settings.device == "None", tr("No device")).clicked() {
+                                    device_choice = Some("None".to_owned());
+                                    ui.close();
+                                }
+                                ui.separator();
+                                for device in PrototypeSettings::DEVICES {
+                                    let label = format!("{}  {}×{}", device.name, device.width as u32, device.height as u32);
+                                    if ui.selectable_label(settings.device == device.name, label).clicked() {
+                                        device_choice = Some(device.name.to_owned());
+                                        ui.close();
+                                    }
+                                }
+                                ui.separator();
+                                if ui.selectable_label(settings.device == PrototypeSettings::CUSTOM_DEVICE, tr("Custom size")).clicked() {
+                                    device_choice = Some(PrototypeSettings::CUSTOM_DEVICE.to_owned());
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                    paint_menu_chevron(ui.painter(), device_menu.response.rect, t.icon_secondary);
+                    let scale_menu = ui.menu_button(format!("{}    ", tr(p.view.scale.label(settings.device().is_some()))), |ui| {
+                        navigation_menu(ui, |ui| {
+                            for scale in PresentScale::options(settings.device().is_some()) {
+                                let label = egui::RichText::new(tr(scale.label(settings.device().is_some()))).color(t.menu_text);
+                                if ui.selectable_label(p.view.scale == *scale, label).clicked() {
+                                    p.set_scale(*scale);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                    paint_menu_chevron(ui.painter(), scale_menu.response.rect, t.icon_secondary);
+                });
+            });
+    });
+    if let Some(id) = navigate {
+        p.go(id, Transition::Instant, 0.0, Easing::Linear, now, true, false);
+    }
+    device_choice
+}
+
+fn paint_menu_chevron(painter: &egui::Painter, button: Rect, color: Color32) {
+    let icon = Rect::from_center_size(pos2(button.right() - 11.0, button.center().y), vec2(17.0, 17.0));
+    icons::paint(painter, icon, Icon::Chevron, color);
+}
+
+fn navigation_menu(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    let t = Tokens::get(ui.ctx());
+    ui.visuals_mut().override_text_color = Some(t.menu_text);
+    egui::Frame::NONE.fill(t.menu).stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(7)).inner_margin(egui::Margin::same(6)).show(
+        ui,
+        |ui| {
+            ui.set_min_width(212.0);
+            add(ui);
+        },
+    );
 }
 
 /// How often the player polls the controllers while its prototype has gamepad triggers (seconds).
@@ -2045,15 +2160,16 @@ fn inspect_hover(p: &mut Presenter, painter: &egui::Painter, ctx: &egui::Context
 /// the right (text on the dark full-window bar, icons in the pane, which follows the theme).
 fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) -> Option<BarAction> {
     let t = Tokens::get(ui.ctx());
-    let (fill, text, dim, hover) = if chrome.pane {
-        (t.panel, t.text, t.text_secondary, t.hover)
-    } else {
-        (Color32::from_rgb(0x2C, 0x2C, 0x2C), Color32::WHITE, Color32::from_gray(140), Color32::from_white_alpha(28))
-    };
+    let (fill, text, dim, hover) = (t.panel, t.text, t.text_secondary, t.hover);
     let r = chrome.round;
     ui.painter().rect_filled(bar, CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, fill);
     if chrome.pane {
         ui.painter().line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, t.border));
+    }
+    let source_key = p.source.as_ref().map_or(0, |s| Arc::as_ptr(s) as usize);
+    if !chrome.pane && p.bar_thumb.as_ref().is_none_or(|(id, source, _)| *id != p.current || *source != source_key) {
+        p.bar_thumb =
+            p.source.as_ref().and_then(|d| crate::assets_panel::thumbnail(ui.ctx(), d, p.current, 38.0)).map(|tex| (p.current, source_key, tex));
     }
     let doc = p.doc.as_ref()?;
     let name = doc.node(p.current).map(|n| n.name.clone()).unwrap_or_default();
@@ -2117,19 +2233,33 @@ fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) 
     // Left: the flow picker and the frame's name, clipped before the buttons.
     let left = ui.painter().with_clip_rect(Rect::from_min_max(bar.min, pos2(x, bar.max.y)));
     let mut lx = bar.min.x + if chrome.pane { 8.0 } else { 12.0 };
+    if !chrome.pane {
+        let thumb = Rect::from_center_size(pos2(lx + 15.0, bar.center().y), vec2(28.0, 28.0));
+        left.rect_filled(thumb, CornerRadius::same(4), t.field);
+        if let Some((_, _, tex)) = &p.bar_thumb {
+            let size = tex.size_vec2();
+            if size.x > 0.0 && size.y > 0.0 {
+                let scaled = size * (26.0 / size.x.max(size.y));
+                let dst = Rect::from_center_size(thumb.center(), scaled);
+                left.image(tex.id(), dst, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+        }
+        lx += 38.0;
+    }
     // The flow playing: its name on the picker, its description on hover; the menu lists each
     // flow with its description.
     let playing = flows.iter().find(|f| f.start == p.start);
     if !flows.is_empty() {
-        let label = format!("{}  ▾", playing.map_or(tr("Flows"), |f| f.name.as_str()));
+        let label = playing.map_or(tr("Flows"), |f| f.name.as_str()).to_owned();
         let tip = playing.map(|f| f.description.trim()).filter(|d| !d.is_empty()).unwrap_or(tr("Flows")).to_string();
         let galley = left.layout_no_wrap(label, semibold(11.5), text);
-        let fr = Rect::from_min_size(pos2(lx, bar.center().y - 12.0), vec2(galley.size().x + 16.0, 24.0));
+        let fr = Rect::from_min_size(pos2(lx, bar.center().y - 12.0), vec2(galley.size().x + 30.0, 24.0));
         let resp = ui.interact(fr.intersect(left.clip_rect()), ui.id().with("pflows"), Sense::click()).tip(tip);
         if resp.hovered() {
             left.rect_filled(fr, CornerRadius::same(5), hover);
         }
         left.galley(pos2(fr.min.x + 8.0, fr.center().y - galley.size().y / 2.0), galley, text);
+        paint_menu_chevron(&left, fr, t.icon_secondary);
         crate::right::menu_popup(&resp).width(240.0).show(|ui| {
             let t = Tokens::get(ui.ctx());
             for f in &flows {
@@ -2149,7 +2279,7 @@ fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) 
         left.text(pos2(lx, bar.center().y), Align2::LEFT_CENTER, "/", regular(11.5), dim);
         lx += 14.0;
     }
-    left.text(pos2(lx, bar.center().y), Align2::LEFT_CENTER, name, regular(11.5), if chrome.pane { text } else { Color32::from_gray(220) });
+    left.text(pos2(lx, bar.center().y), Align2::LEFT_CENTER, name, regular(11.5), text);
     action
 }
 
