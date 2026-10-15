@@ -49,6 +49,7 @@ pub mod render_worker;
 pub mod right;
 pub mod scale_panel;
 pub mod section_panel;
+pub mod settings;
 pub mod shortcuts;
 pub mod shortcuts_panel;
 pub mod style_picker;
@@ -139,6 +140,8 @@ mod proto_editor_tests;
 mod proto_reorder_tests;
 #[cfg(test)]
 mod proto_responsive_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod shortcut_keys_tests;
 #[cfg(test)]
@@ -294,6 +297,8 @@ pub struct UiState {
     /// The tab the About window shows.
     pub about_tab: dialogs::AboutTab,
     pub preferences: bool,
+    /// The selected category in Preferences.
+    pub preferences_category: settings::Category,
     pub shortcuts_panel: bool,
     /// The Keyboard shortcuts panel's tab and search text.
     pub shortcuts_tab: figcraft_engine::keymap::Group,
@@ -411,6 +416,7 @@ impl Default for UiState {
             about: false,
             about_tab: dialogs::AboutTab::About,
             preferences: false,
+            preferences_category: settings::Category::General,
             shortcuts_panel: false,
             shortcuts_tab: figcraft_engine::keymap::Group::Essential,
             shortcuts_query: String::new(),
@@ -993,6 +999,7 @@ impl FigApp {
         if !self.has_files() || self.ui.home {
             tabs::tab_bar(self, ui);
             home::show(self, ui);
+            shortcuts::home_preferences(self, &ctx, typing);
             dialogs::keys(self, &ctx);
             dialogs::show(self, &ctx);
             self.toast_ui(&ctx);

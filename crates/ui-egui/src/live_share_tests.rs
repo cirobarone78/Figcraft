@@ -468,9 +468,11 @@ fn the_join_dialog_is_the_same_field() {
 fn the_server_preference_resets_and_turns_online_sharing_off() {
     let (mut h, script) = harness();
     h.app.ui.preferences = true;
-    let shapes = h.frames(2);
+    let mut shapes = h.frames(3);
+    h.click(text_center(&shapes, "Collaboration"));
+    shapes = h.frames(2);
     assert!(has_text(&shapes, "Server for online sharing") && has_text(&shapes, "Reset"));
-    click(&mut h, &shapes, "Reset");
+    h.click(text_center(&shapes, "Reset"));
     assert_eq!(h.app.session.prefs.publish_server, DEFAULT_SERVER);
     // Off: Preferences say what that means, and the popover offers the local network only.
     h.app.session.execute("pref.publishServer", &json!({"url": ""})).unwrap();

@@ -162,6 +162,16 @@ fn sidebar(app: &mut FigApp, ui: &mut Ui, t: &Tokens, left: Rect) {
         }
         y += 34.0;
     }
+    let r = Rect::from_min_size(pos2(left.min.x + 8.0, left.max.y - 44.0), vec2(SIDEBAR - 16.0, 32.0));
+    let label = tr("Preferences…");
+    let resp = ui.interact(r, ui.id().with("home_preferences"), Sense::click());
+    a11y::button(&resp, label);
+    ui.painter().rect_filled(r, CornerRadius::same(5), if resp.hovered() { t.hover } else { t.field });
+    focus_ring(ui, t, r, &resp, 5);
+    ui.painter().text(r.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, label, regular(12.0), t.text);
+    if resp.on_hover_text(crate::shortcuts::tip(label, "app.preferences")).clicked() {
+        crate::menus::invoke(app, "app.preferences");
+    }
 }
 
 /// A ring around a card or row that has the keyboard.

@@ -61,6 +61,22 @@ pub fn lookup(context: keymap::Context, key: Key, physical: Option<Key>, m: Modi
     keymap::lookup(platform(), context, key.name(), held)
 }
 
+/// The home screen has no canvas shortcut loop; keep Preferences' global key available there.
+pub(crate) fn home_preferences(app: &mut FigApp, ctx: &Context, typing: bool) {
+    if typing || app.ui.preferences {
+        return;
+    }
+    let events = ctx.input(|i| i.events.clone());
+    for event in events {
+        if let Event::Key { key, physical_key, pressed: true, modifiers, .. } = event
+            && lookup(keymap::Context::Canvas, key, physical_key, modifiers).is_some_and(|binding| binding.id == "app.preferences")
+        {
+            app.run("app.preferences", json!({}));
+            return;
+        }
+    }
+}
+
 /// The key a menu shows for a command.
 pub fn shortcut(id: &str) -> Option<&'static str> {
     keymap::primary(id, platform())
@@ -96,6 +112,10 @@ fn cached_tip(label: &'static str, key: Option<&'static str>) -> &'static str {
 /// began.
 pub fn handle(app: &mut FigApp, ctx: &Context, typing: bool) {
     note_platform(ctx);
+    // The central Preferences modal owns keyboard input; canvas shortcuts must not edit its file.
+    if app.ui.preferences {
+        return;
+    }
     // Text fields in panels own the keyboard (also the key that ends their editing).
     if typing || crate::a11y::field_focused(ctx) || app.ui.palette.is_some() {
         return;

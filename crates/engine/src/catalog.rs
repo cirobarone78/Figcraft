@@ -241,6 +241,7 @@ pub static MENU: &[MenuItem] = &[
     m!("Plugins", "Manage plugins…", "plugins.manage"),
     m!("Plugins/Development", "Import plugin from manifest…", "plugin.import"),
     // Preferences
+    m!("Preferences", "Preferences…", "app.preferences"),
     m!("Preferences", "Snap to geometry", "view.snapGeometry"),
     m!("Preferences", "Snap to objects", "view.snapObjects"),
     m!("Preferences", "Snap to pixel grid", "view.snapPixel"),
@@ -250,7 +251,6 @@ pub static MENU: &[MenuItem] = &[
     m!("Preferences", "Show dimensions on objects", "pref.showDimensions"),
     m!("Preferences", "Use number keys for opacity", "pref.numberKeysOpacity"),
     m!("Preferences", "Nudge amount…", "pref.nudge"),
-    m!("Preferences", "Preferences…", "app.preferences"),
     // Libraries
     m!("Libraries", "Open libraries", "libraries.open"),
     m!("Libraries", "Publish library…", "libraries.publish"),

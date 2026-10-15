@@ -1585,3 +1585,13 @@ name = "English"
 "⌘ click" = "⌘ click"
 "⌘ scroll" = "⌘ scroll"
 "⌥ drag" = "⌥ drag"
+
+# Central preferences navigation and current-document canvas options.
+"Collaboration" = "Collaboration"
+"General" = "General"
+"Large" = "Large"
+"Open a document to change its canvas options." = "Open a document to change its canvas options."
+"Preferences…" = "Preferences…"
+"Small" = "Small"
+"Snap to objects" = "Snap to objects"
+"These view and snapping options apply to the current document." = "These view and snapping options apply to the current document."

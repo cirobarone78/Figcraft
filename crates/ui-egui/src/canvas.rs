@@ -357,7 +357,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     let typing_elsewhere = crate::a11y::field_focused(&ctx);
     app.canvas.space_pan = space && !editing_text && !typing_elsewhere;
     // Dropped files import onto the canvas.
-    let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+    let dropped = if app.ui.preferences { Vec::new() } else { ctx.input(|i| i.raw.dropped_files.clone()) };
     for f in dropped {
         let path = f.path().to_path_buf();
         let pt = hover_pos.map(|h| app.to_page(h)).unwrap_or_default();
