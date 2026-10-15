@@ -143,7 +143,12 @@ fn main() -> eframe::Result {
     let recovery_root = services::config_dir().map(|d| d.join("Recovery"));
     // The preferences first: they hold the online files a recovered document may be one of.
     let recovery = recovery::Shared::default();
-    let svc = services::Desktop::load(recovery.clone());
+    let mut svc = services::Desktop::load(recovery.clone());
+    // The control channel AI agents drive the app through (MCP): on at launch with `--control`, or
+    // when the user asked for it every time (Help ▸ Connect an AI agent), and from that window.
+    let queue: Arc<Mutex<Vec<ControlRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let control = control_server::Control::new(queue.clone(), ctx_slot.clone());
+    svc.control = Some(control.clone());
     if let Some(prefs) = svc.prefs.clone() {
         session.prefs = prefs;
     }
@@ -172,9 +177,11 @@ fn main() -> eframe::Result {
     if let Some(link) = &args.join {
         figcraft_ui_egui::live::open_invite(&mut fig, link);
     }
-    let queue: Arc<Mutex<Vec<ControlRequest>>> = Arc::new(Mutex::new(Vec::new()));
-    if let Some(p) = port {
-        control_server::start(p, queue.clone(), ctx_slot.clone());
+    let port = port.or_else(|| fig.session.prefs.mcp_on_launch.then_some(fig.session.prefs.mcp_port));
+    if let Some(p) = port
+        && let Err(e) = control.start(p)
+    {
+        fig.ui.mcp_error = Some(e);
     }
     let icon = services::window_icon();
     let mut viewport = egui::ViewportBuilder::default()

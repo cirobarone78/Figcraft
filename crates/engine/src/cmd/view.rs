@@ -334,6 +334,13 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("pref.showDimensions", "Show dimensions on objects", "{on?}", false, |s, p| pref(s, p, |x| &mut x.show_dimensions)),
         spec!("pref.numberKeysOpacity", "Use number keys for opacity", "{on?}", false, |s, p| pref(s, p, |x| &mut x.number_keys_opacity)),
         spec!("pref.reduceMotion", "Reduce motion", "{on?}", false, |s, p| pref(s, p, |x| &mut x.reduce_motion)),
+        spec!(
+            "pref.mcpOnLaunch",
+            "Turn on the AI agent connection when FigCraft opens",
+            "{on?}  (the desktop app's MCP connection, Help ▸ Connect an AI agent)",
+            false,
+            |s, p| pref(s, p, |x| &mut x.mcp_on_launch)
+        ),
         spec!("pref.nudge", "Nudge amount", "{small?, big?}", false, |s, p| {
             s.prefs.nudge_small = num(p, "small").unwrap_or(s.prefs.nudge_small).clamp(0.01, 1000.0);
             s.prefs.nudge_big = num(p, "big").unwrap_or(s.prefs.nudge_big).clamp(0.01, 10000.0);
@@ -385,6 +392,25 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("app.actions", "Actions", "{}", false, |s, _| ui(s, "palette.actions")),
         spec!("help.shortcuts", "Keyboard shortcuts", "{}", false, |s, _| ui(s, "panel.shortcuts")),
         spec!("help.about", "About FigCraft", "{}", false, |s, _| ui(s, "dialog.about")),
+        spec!(
+            "help.mcp",
+            "Connect an AI agent (MCP)",
+            "{}  opens the window that turns the AI agent connection on and shows the MCP client settings (the app)",
+            false,
+            |s, _| ui(s, "dialog.mcp")
+        ),
+        spec!(
+            "app.mcpStart",
+            "Turn on the AI agent connection",
+            "{port? (default the saved one, 7979)}  the desktop app starts its localhost control channel, which `figcraft-cli mcp --attach <port>` drives (the app; a no-op where there is none)",
+            false,
+            |s, p| {
+                let port = p.get("port").and_then(Value::as_u64).and_then(|n| u16::try_from(n).ok()).filter(|n| *n != 0);
+                let port = port.unwrap_or(s.prefs.mcp_port);
+                s.request_ui("mcp.start", json!({"port": port}));
+                Ok(json!({"port": port}))
+            }
+        ),
         spec!("help.page", "Help page", "{}", false, |s, _| ui(s, "open.help")),
         spec!(
             "help.gettingStarted",

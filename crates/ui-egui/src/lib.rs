@@ -121,6 +121,8 @@ mod live_tests;
 #[cfg(test)]
 mod live_text_tests;
 #[cfg(test)]
+mod mcp_dialog_tests;
+#[cfg(test)]
 mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
@@ -212,6 +214,20 @@ pub trait Services {
     fn save_prefs(&mut self, _prefs: &figcraft_engine::Prefs) {}
     /// The OS or browser language as a tag ("es-ES"), for the "system" language preference.
     fn system_language(&self) -> Option<String> {
+        None
+    }
+    /// The port the AI agent (MCP) connection listens on (127.0.0.1), or `None` while it is off
+    /// or where there is none (the browser).
+    fn control_port(&self) -> Option<u16> {
+        None
+    }
+    /// Turn the AI agent (MCP) connection on at `port` (on already: its port); the error says why
+    /// it couldn't (the port is taken).
+    fn control_start(&mut self, _port: u16) -> Result<u16, String> {
+        Err("not available in this build".into())
+    }
+    /// The `figcraft-cli` an MCP client launches to drive this app, when it sits next to the app.
+    fn mcp_cli_path(&self) -> Option<PathBuf> {
         None
     }
     /// The controller buttons held now on any controller: bit i is standard gamepad layout index i
@@ -323,6 +339,10 @@ pub struct UiState {
     pub about: bool,
     /// The tab the About window shows.
     pub about_tab: dialogs::AboutTab,
+    /// The Connect an AI agent (MCP) window is open.
+    pub mcp: bool,
+    /// Why turning the AI agent connection on failed last (shown in that window).
+    pub mcp_error: Option<String>,
     pub preferences: bool,
     pub shortcuts_panel: bool,
     /// The Keyboard shortcuts panel's tab and search text.
@@ -440,6 +460,8 @@ impl Default for UiState {
             variables: None,
             about: false,
             about_tab: dialogs::AboutTab::About,
+            mcp: false,
+            mcp_error: None,
             preferences: false,
             shortcuts_panel: false,
             shortcuts_tab: figcraft_engine::keymap::Group::Essential,
@@ -668,6 +690,14 @@ impl FigApp {
                     self.ui.about_tab = dialogs::AboutTab::About;
                 }
                 "dialog.preferences" => self.ui.preferences = true,
+                "dialog.mcp" => {
+                    self.ui.mcp = true;
+                    self.ui.mcp_error = None;
+                }
+                "mcp.start" => {
+                    let port = r.data.get("port").and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).unwrap_or(self.session.prefs.mcp_port);
+                    self.ui.mcp_error = self.services.control_start(port).err();
+                }
                 "panel.shortcuts" => self.ui.shortcuts_panel = !self.ui.shortcuts_panel,
                 "palette.actions" => self.ui.palette = Some(String::new()),
                 "panel.design" => self.ui.right_tab = RightTab::Design,

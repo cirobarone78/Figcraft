@@ -260,3 +260,17 @@ fn timed_out_requests_release_a_full_deferred_ui_queue() {
         worker.join().unwrap().unwrap();
     }
 }
+
+#[test]
+fn the_channel_turns_on_once_and_says_when_its_port_is_taken() {
+    let taken = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let busy = taken.local_addr().unwrap().port();
+    let control = Control::new(queue(), context());
+    assert_eq!(control.port(), None);
+    assert!(control.start(busy).is_err(), "a port another listener holds");
+    assert_eq!(control.port(), None, "still off");
+    let free = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+    assert_eq!(control.start(free), Ok(free));
+    assert_eq!(control.start(busy), Ok(free), "on already: the same channel");
+    assert_eq!(control.port(), Some(free));
+}

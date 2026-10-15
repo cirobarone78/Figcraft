@@ -99,6 +99,69 @@ fn about_body(ui: &mut egui::Ui, t: &Tokens) {
     );
 }
 
+pub const MCP_WIDTH: f32 = 460.0;
+
+/// The settings an MCP client (Claude Desktop's `claude_desktop_config.json`, a project's
+/// `.mcp.json`) needs to drive this app: `figcraft-cli mcp --attach <port>`.
+pub fn mcp_config(cli: &str, port: u16) -> String {
+    let config = json!({"mcpServers": {"figcraft": {"command": cli, "args": ["mcp", "--attach", port.to_string()]}}});
+    serde_json::to_string_pretty(&config).unwrap_or_default()
+}
+
+/// Help ▸ Connect an AI agent (MCP): turn the connection on (now, and when the app opens) and the
+/// client settings to copy, with the real path of `figcraft-cli` when it sits next to the app.
+fn mcp_body(app: &mut FigApp, ui: &mut egui::Ui, t: &Tokens) {
+    ui.set_width(MCP_WIDTH);
+    ui.label(tr("AI agents like Claude can design in this window through MCP: they create and edit layers, and you see every change live."));
+    ui.add_space(12.0);
+    let port = app.services.control_port();
+    ui.horizontal(|ui| match port {
+        Some(p) => {
+            ui.label(RichText::new(trf("On: listening on {address}", &[("address", &format!("127.0.0.1:{p}"))])).color(t.success));
+        }
+        None => {
+            ui.label(RichText::new(tr("Turned off")).color(t.text_secondary));
+            if crate::widgets::button(ui, tr("Turn on"), true, true).clicked() {
+                app.run("app.mcpStart", json!({}));
+            }
+        }
+    });
+    if let Some(e) = app.ui.mcp_error.clone() {
+        ui.label(RichText::new(trf("Couldn't turn it on: {error}", &[("error", &e)])).color(t.danger));
+    }
+    let on_launch = app.session.prefs.mcp_on_launch;
+    if crate::widgets::checkbox(ui, on_launch, tr("Turn on when FigCraft opens")) {
+        app.run("pref.mcpOnLaunch", json!({"on": !on_launch}));
+        let prefs = app.session.prefs.clone();
+        app.services.save_prefs(&prefs);
+    }
+    ui.add_space(12.0);
+    ui.label(tr("Add this to your MCP client's settings (Claude Desktop: Settings ▸ Developer ▸ Edit Config), then restart the client:"));
+    ui.add_space(4.0);
+    let cli = app.services.mcp_cli_path();
+    let cli_text = cli.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/path/to/figcraft-cli".into());
+    let config = mcp_config(&cli_text, port.unwrap_or(app.session.prefs.mcp_port));
+    egui::Frame::new().fill(t.field).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(&config).monospace().color(t.text));
+    });
+    ui.add_space(6.0);
+    if crate::widgets::button(ui, tr("Copy"), false, true).clicked() {
+        app.services.clipboard_set_text(&config);
+    }
+    if cli.is_none() {
+        ui.label(
+            RichText::new(tr(
+                "figcraft-cli isn't next to this app or on your PATH: get it from the release page (or build it with cargo build --release -p figcraft-cli) and put its path in the settings.",
+            ))
+            .color(t.warning)
+            .font(regular(11.0)),
+        );
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new(tr("Only apps on this computer can connect.")).color(t.text_secondary).font(regular(11.0)));
+}
+
 /// Escape closes the topmost simple dialog (one without menus of its own), before the canvas's
 /// shortcuts see it (it doesn't deselect), like a system dialog: from one of its fields too.
 pub fn keys(app: &mut FigApp, ctx: &Context) {
@@ -110,14 +173,15 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
         || u.export_preview
         || u.shortcuts_panel
         || u.preferences
-        || u.about;
+        || u.about
+        || u.mcp;
     if !open || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         return;
     }
     if u.color_profile.take().is_some() || u.find.take().is_some() || u.batch_rename.take().is_some() {
         return;
     }
-    for flag in [&mut u.confirm_close, &mut u.export_preview, &mut u.shortcuts_panel, &mut u.preferences, &mut u.about] {
+    for flag in [&mut u.confirm_close, &mut u.export_preview, &mut u.shortcuts_panel, &mut u.preferences, &mut u.about, &mut u.mcp] {
         if std::mem::take(flag) {
             return;
         }
@@ -140,6 +204,13 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
         });
         if !open {
             app.ui.about = false;
+        }
+    }
+    if app.ui.mcp {
+        let mut open = true;
+        window(tr("Connect an AI agent (MCP)"), ctx).open(&mut open).show(ctx, |ui| mcp_body(app, ui, &t));
+        if !open {
+            app.ui.mcp = false;
         }
     }
     if app.ui.preferences {

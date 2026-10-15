@@ -26,13 +26,44 @@ pub fn drain_queue(queue: &Queue, target: &mut Vec<ControlRequest>) {
     target.extend(queue.drain(..count));
 }
 
-pub fn start(port: u16, queue: Queue, ctx: CtxSlot) {
+/// The control channel the app can turn on while it runs (Help ▸ Connect an AI agent, or
+/// `--control` at launch): one per app, listening on the first port it was started at.
+#[derive(Clone)]
+pub struct Control {
+    queue: Queue,
+    ctx: CtxSlot,
+    port: Arc<Mutex<Option<u16>>>,
+}
+
+impl Control {
+    pub fn new(queue: Queue, ctx: CtxSlot) -> Self {
+        Self { queue, ctx, port: Arc::new(Mutex::new(None)) }
+    }
+
+    /// The port it listens on, `None` while it is off.
+    pub fn port(&self) -> Option<u16> {
+        *self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Turn it on at `port`; on already: its port (one channel per app).
+    pub fn start(&self, port: u16) -> Result<u16, String> {
+        let mut slot = self.port.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(p) = *slot {
+            return Ok(p);
+        }
+        start(port, self.queue.clone(), self.ctx.clone())?;
+        *slot = Some(port);
+        Ok(port)
+    }
+}
+
+pub fn start(port: u16, queue: Queue, ctx: CtxSlot) -> Result<(), String> {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
             log::error!("control server: can't bind 127.0.0.1:{port}: {e} (another app may own it; pick another port)");
             eprintln!("FigCraft control server failed to bind port {port}: {e}");
-            return;
+            return Err(format!("127.0.0.1:{port}: {e}"));
         }
     };
     eprintln!("FigCraft control server listening on 127.0.0.1:{port}");
@@ -44,7 +75,9 @@ pub fn start(port: u16, queue: Queue, ctx: CtxSlot) {
     });
     if let Err(e) = spawned {
         log::error!("control server thread: {e}");
+        return Err(e.to_string());
     }
+    Ok(())
 }
 
 fn spawn_connection(stream: TcpStream, queue: Queue, ctx: CtxSlot, workers: &mut Vec<std::thread::JoinHandle<()>>, timeout: Duration) {

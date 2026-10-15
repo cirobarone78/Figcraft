@@ -19,6 +19,12 @@ The server lives in `crates/mcp` (`figcraft-mcp`) and is started by the CLI:
 
 `--attach` also takes `host:port`. The control channel only listens on 127.0.0.1.
 
+The app turns the control channel on with `figcraft --control <port>`, or without a terminal:
+**Help ▸ Connect an AI agent (MCP)** turns it on (port 7979 by default), can turn it on every
+time FigCraft opens (`pref.mcpOnLaunch`), and shows the client settings below with the real path
+of the `figcraft-cli` next to the app, ready to copy. `app.mcpStart` does the same as its Turn on
+button.
+
 Attached calls are never automatically replayed after a transport failure: the app may have
 applied the request before its reply was lost. The error reports that the operation may have
 completed; inspect the document before retrying an edit. The next explicit call reconnects.

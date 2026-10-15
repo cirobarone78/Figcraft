@@ -19,6 +19,8 @@ pub struct Desktop {
     language: Option<String>,
     /// Recovery copies of unsaved files (written at once after a panic).
     recovery: crate::recovery::Shared,
+    /// The localhost control channel AI agents drive the app through (MCP), once `main` set it up.
+    pub control: Option<crate::control_server::Control>,
 }
 
 pub fn config_dir() -> Option<PathBuf> {
@@ -53,7 +55,7 @@ impl Desktop {
         let reduce_motion = Arc::new(AtomicBool::new(false));
         let flag = reduce_motion.clone();
         std::thread::spawn(move || flag.store(system_reduce_motion(), Ordering::Relaxed));
-        Self { clipboard: arboard::Clipboard::new().ok(), dir, prefs, reduce_motion, language: system_language(), recovery }
+        Self { clipboard: arboard::Clipboard::new().ok(), dir, prefs, reduce_motion, language: system_language(), recovery, control: None }
     }
 }
 
@@ -199,6 +201,15 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 impl Services for Desktop {
+    fn control_port(&self) -> Option<u16> {
+        self.control.as_ref().and_then(crate::control_server::Control::port)
+    }
+    fn control_start(&mut self, port: u16) -> Result<u16, String> {
+        self.control.as_ref().ok_or_else(|| "no control channel".to_string())?.start(port)
+    }
+    fn mcp_cli_path(&self) -> Option<PathBuf> {
+        mcp_cli_path()
+    }
     fn pick_open(&mut self, title: &str, exts: &[&str]) -> Option<PathBuf> {
         rfd::FileDialog::new().set_title(title).add_filter("Supported files", exts).pick_file()
     }
@@ -269,4 +280,14 @@ pub fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width: w, height: h })
+}
+
+/// The `figcraft-cli` MCP clients launch to drive the app: next to this executable (a build
+/// folder, the Windows install), else the first on `PATH` (Linux packages; the macOS CLI zip
+/// unpacked somewhere on it).
+pub fn mcp_cli_path() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "figcraft-cli.exe" } else { "figcraft-cli" };
+    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join(name)));
+    let on_path = std::env::var_os("PATH").into_iter().flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).map(|dir| dir.join(name));
+    beside.into_iter().chain(on_path).find(|cli| cli.is_file())
 }
