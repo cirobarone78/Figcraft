@@ -192,15 +192,9 @@ fn main() -> eframe::Result {
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([800.0, 500.0])
         .with_drag_and_drop(true);
-    // The tab strip is the title bar: macOS keeps its window buttons inset into it; elsewhere the
-    // window is frameless and FigCraft draws the buttons and resize edges.
-    if cfg!(target_os = "macos") {
-        viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
-        fig.ui.title_bar = figcraft_ui_egui::TitleBar::Inset;
-    } else {
-        viewport = viewport.with_decorations(false);
-        fig.ui.title_bar = figcraft_ui_egui::TitleBar::Custom;
-    }
+    // Other windows inherit this choice, so they keep the same native frame on Linux.
+    fig.ui.title_bar = desktop_title_bar();
+    viewport = window_chrome(viewport, fig.ui.title_bar);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
@@ -232,4 +226,35 @@ fn main() -> eframe::Result {
         startup::failed(e, port.is_some());
     }
     result
+}
+
+fn desktop_title_bar() -> figcraft_ui_egui::TitleBar {
+    use figcraft_ui_egui::TitleBar;
+    if cfg!(target_os = "macos") {
+        TitleBar::Inset
+    } else if cfg!(target_os = "linux") {
+        TitleBar::Native
+    } else {
+        TitleBar::Custom
+    }
+}
+
+fn window_chrome(viewport: egui::ViewportBuilder, title_bar: figcraft_ui_egui::TitleBar) -> egui::ViewportBuilder {
+    use figcraft_ui_egui::TitleBar;
+    match title_bar {
+        TitleBar::Inset => viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false),
+        TitleBar::Native => viewport.with_decorations(true),
+        TitleBar::Custom => viewport.with_decorations(false),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_window_tests {
+    #[test]
+    fn the_desktop_and_detached_windows_use_native_chrome() {
+        let bar = super::desktop_title_bar();
+        assert_eq!(bar, figcraft_ui_egui::TitleBar::Native);
+        let viewport = super::window_chrome(egui::ViewportBuilder::default(), bar);
+        assert_eq!(viewport.decorations, Some(true));
+    }
 }
