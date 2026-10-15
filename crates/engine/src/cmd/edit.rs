@@ -530,6 +530,8 @@ pub fn copy_to_clipboard(s: &mut Session, ids: &[NodeId]) -> Result<()> {
     s.clipboard.images = images;
     s.clipboard.bounds = bounds;
     s.clipboard.source_doc = uid;
+    s.clipboard.pastes = 0;
+    s.clipboard.cut = false;
     Ok(())
 }
 
@@ -542,6 +544,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
 fn cut(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = req_targets("edit.cut", s, p)?;
     copy_to_clipboard(s, &ids)?;
+    s.clipboard.cut = true;
     delete(s, &json!({"ids": ids}))
 }
 
@@ -585,10 +588,14 @@ pub fn paste_into(s: &mut Session, parent: NodeId, at: Option<(f64, f64)>) -> Re
     Ok(out)
 }
 
+/// How far down and right a paste lands from where it was copied (page units), so the copy
+/// doesn't hide the original; each further paste of the same copy steps once more.
+pub const PASTE_OFFSET: f64 = 16.0;
+
 fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     let page = s.page()?;
-    // Figma pastes into the selected frame (if one is selected), at the same position when it fits,
-    // else in the frame's centre; otherwise in place on the page (or the viewport centre).
+    // Pastes go into the selected frame (if one is selected), offset from where they were when that
+    // fits, else in the frame's centre; otherwise offset on the page (or the viewport centre).
     let sel = s.selection();
     let doc = s.doc()?;
     let target = id(p, "parent").or_else(|| {
@@ -621,7 +628,21 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     };
+    // Where it was copied: one offset step further for each paste of this copy (a cut's first
+    // paste goes back in place).
+    let offset = at.is_none() && s.clipboard.bounds.is_some();
+    let at = match s.clipboard.bounds.filter(|_| offset) {
+        Some(b) => {
+            let steps = if s.clipboard.cut { s.clipboard.pastes } else { s.clipboard.pastes.saturating_add(1) };
+            let d = PASTE_OFFSET * f64::from(steps);
+            Some((b.x0 + d, b.y0 + d))
+        }
+        None => at,
+    };
     let ids = paste_into(s, parent, at)?;
+    if offset {
+        s.clipboard.pastes = s.clipboard.pastes.saturating_add(1);
+    }
     s.set_selection(ids.clone());
     Ok(json!({"ids": ids}))
 }

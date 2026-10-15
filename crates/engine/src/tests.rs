@@ -326,7 +326,7 @@ fn copy_paste_and_duplicate() {
     let r = s.execute("edit.paste", &json!({})).unwrap();
     let pid = params::id_of(&r["ids"][0]).unwrap();
     assert_ne!(pid, a);
-    assert_eq!(s.doc().unwrap().world_bounds(pid).unwrap().x0, 5.0);
+    assert_eq!(s.doc().unwrap().world_bounds(pid).unwrap().x0, 21.0, "offset from the original");
     let d = s.execute("edit.duplicate", &json!({"ids": [a]})).unwrap();
     assert_eq!(d["ids"].as_array().unwrap().len(), 1);
 }
