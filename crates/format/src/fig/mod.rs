@@ -39,6 +39,16 @@ const MAX_CHUNK: u64 = 512 * 1024 * 1024;
 const MAX_IMAGE: u64 = 256 * 1024 * 1024;
 /// Most chunks read from `canvas.fig`.
 const MAX_CHUNKS: usize = 16;
+/// Most layers imported from a `.fig` file: one per [`BYTES_PER_LAYER`] bytes of its message,
+/// at least the REST import's cap and at most [`MAX_FIG_NODES`]. Instances expand into a layer per
+/// layer of their component, so a small file can't claim a large count; a large one gets room.
+const BYTES_PER_LAYER: usize = 128;
+const MAX_FIG_NODES: usize = 2_000_000;
+
+/// Most layers imported from a `.fig` file whose message is `len` bytes.
+pub(crate) fn layer_budget(len: usize) -> usize {
+    (len / BYTES_PER_LAYER).clamp(crate::rest::MAX_NODES, MAX_FIG_NODES)
+}
 
 /// Whether `bytes` look like a `.fig` file: a zip holding `canvas.fig`, or a bare canvas.
 pub fn is_fig(bytes: &[u8]) -> bool {
@@ -57,14 +67,19 @@ pub fn try_import(bytes: &[u8], name: &str) -> Option<Result<(Document, Vec<Stri
 /// Build a document from a `.fig` file. Returns it with the warnings about what was skipped or
 /// approximated. `name`: the document name when the file doesn't carry one.
 pub fn import(bytes: &[u8], name: &str) -> Result<(Document, Vec<String>), FormatError> {
-    let archive = Archive::open(bytes)?;
-    let (schema, message) = decode_canvas(&archive.canvas)?;
+    let mut archive = Archive::open(bytes)?;
+    // Each stage's input is dropped as soon as the next one is built: in a large file every one
+    // of them takes gigabytes, and holding them all at once runs out of memory.
+    let (schema, message) = decode_canvas(&std::mem::take(&mut archive.canvas))?;
     let root = schema.find("Message").ok_or_else(|| corrupt("the schema has no Message definition"))?;
     let msg = schema.decode_message(root, &message).map_err(|e| corrupt(e.to_string()))?;
+    let max_nodes = layer_budget(message.len());
+    drop(message);
     let file_name = archive.file_name.as_deref().filter(|n| !n.trim().is_empty()).unwrap_or(name);
-    let (json, mut warnings) = map::to_rest(&msg, file_name);
+    let (json, mut warnings, networks) = map::to_rest(&msg, file_name, max_nodes);
+    drop(msg);
     let images = |r: &str| archive.image(r);
-    let (doc, more) = crate::rest::import(&json, &images)?;
+    let (doc, more) = crate::rest::import_with_networks(&json, &images, networks, max_nodes)?;
     warnings.extend(more.into_iter().filter_map(map::adapt_warning));
     Ok((doc, warnings))
 }

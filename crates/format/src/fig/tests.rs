@@ -586,7 +586,7 @@ fn mangled_kiwi_never_panics() {
     }
     for cut in (0..msg.len()).step_by(3) {
         if let Ok(kv) = sc.decode_message(root, &msg[..cut]) {
-            let _ = map::to_rest(&kv, "x");
+            let _ = map::to_rest(&kv, "x", crate::rest::MAX_NODES);
         }
     }
     for _ in 0..2000 {
@@ -596,8 +596,8 @@ fn mangled_kiwi_never_panics() {
             m[i] = r.next() as u8;
         }
         if let Ok(kv) = sc.decode_message(root, &m) {
-            let (json, _) = map::to_rest(&kv, "x");
-            let _ = crate::rest::import(&json, &crate::rest::no_images);
+            let (json, _, networks) = map::to_rest(&kv, "x", crate::rest::MAX_NODES);
+            let _ = crate::rest::import_with_networks(&json, &crate::rest::no_images, networks, crate::rest::MAX_NODES);
         }
         let mut sbytes = schema_bytes.clone();
         let i = (r.next() as usize) % sbytes.len();
@@ -617,6 +617,42 @@ fn mangled_kiwi_never_panics() {
         framed.extend_from_slice(&junk);
         let _ = import(&framed, "x");
     }
+}
+
+#[test]
+fn large_messages_get_a_larger_value_budget() {
+    // Small messages keep the fixed floor: a few bytes can't expand into a huge tree.
+    assert_eq!(kiwi::value_budget(0), 20_000_000);
+    assert_eq!(kiwi::value_budget(1 << 20), 20_000_000);
+    // A real 400 000-layer file: a 334 MB message holding 30.5 million values (about 11 bytes
+    // each) was refused as "too many values".
+    assert!(kiwi::value_budget(333_714_035) > 30_514_899);
+    // Still bounded by the largest chunk read.
+    assert!(kiwi::value_budget(MAX_CHUNK as usize) <= 128 << 20);
+}
+
+#[test]
+fn the_layer_cap_follows_the_message_size() {
+    // A small (or broken) file keeps the REST import's cap: instances expand into a layer per
+    // layer of their component, and a few bytes mustn't claim millions of layers.
+    assert_eq!(layer_budget(0), crate::rest::MAX_NODES);
+    assert_eq!(layer_budget(1 << 20), crate::rest::MAX_NODES);
+    // A real 894 004-layer file (a 334 MB message) stopped at 200 000 and came in with 27 of its
+    // 30 pages empty.
+    assert!(layer_budget(333_714_035) > 894_004);
+    // No message gets more than the ceiling.
+    assert_eq!(layer_budget(MAX_CHUNK as usize * MAX_CHUNKS), MAX_FIG_NODES);
+}
+
+#[test]
+fn the_mapper_stops_at_the_layer_cap_it_is_given() {
+    let mut nodes = vec![node(0, None, "DOCUMENT", "D", vec![]), node(1, Some((0, "!")), "CANVAS", "P", vec![])];
+    nodes.extend((2..12).map(|i| node(i, Some((1, "!")), "RECTANGLE", "R", vec![("size", xy(1.0, 1.0))])));
+    let msg = o(vec![("nodeChanges", arr(nodes))]);
+    let (_, warnings, _) = map::to_rest(&msg, "x", 5);
+    assert!(warnings.iter().any(|w| w.contains("more than 5 layers")), "{warnings:?}");
+    let (_, warnings, _) = map::to_rest(&msg, "x", crate::rest::MAX_NODES);
+    assert!(!warnings.iter().any(|w| w.contains("more than")), "{warnings:?}");
 }
 
 #[test]
@@ -711,7 +747,7 @@ fn dump_samples() {
         std::fs::write(format!("{out}/{stem}.schema.txt"), txt).unwrap();
         let msg = schema.decode_message(schema.find("Message").unwrap(), &message).unwrap();
         std::fs::write(format!("{out}/{stem}.json"), serde_json::to_string_pretty(&debug_json(&msg)).unwrap()).unwrap();
-        let (rest, _) = map::to_rest(&msg, &stem);
+        let (rest, ..) = map::to_rest(&msg, &stem, super::layer_budget(message.len()));
         std::fs::write(format!("{out}/{stem}.rest.json"), serde_json::to_string_pretty(&rest).unwrap()).unwrap();
     }
 }
