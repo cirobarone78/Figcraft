@@ -420,6 +420,10 @@ pub struct UiState {
     /// A message at the bottom of the window and how long it has been showing.
     pub toast: Option<(String, ToastClock)>,
     pub present: Option<present::Presenter>,
+    /// A presentation kept alive while its design tab or Home is in front.
+    pub paused_present: Option<present::Presenter>,
+    /// The file that owns the presentation tab.
+    pub present_uid: Option<u64>,
     /// The full-window presenter's options (how it sizes the prototype), kept between
     /// presentations.
     pub present_view: present::PresentView,
@@ -537,6 +541,8 @@ impl Default for UiState {
             icon_gallery: false,
             toast: None,
             present: None,
+            paused_present: None,
+            present_uid: None,
             present_view: present::PresentView::default(),
             preview: None,
             picker: None,
@@ -825,6 +831,9 @@ impl FigApp {
                         let mut p = present::Presenter::new(start);
                         p.view = self.ui.present_view;
                         self.ui.present = Some(p);
+                        self.ui.paused_present = None;
+                        self.ui.present_uid = self.session.docs.get(self.session.active).map(|d| d.uid);
+                        self.ui.home = false;
                     }
                 }
                 "present.options" => {
@@ -1277,6 +1286,7 @@ impl FigApp {
         // The Inspect tab measures on hover without Alt.
         self.session.tool.redlines = self.ui.right_tab == RightTab::Inspect;
         self.end_pen_outside_design();
+        tabs::tab_bar(self, ui);
         if self.ui.present.is_some() {
             present::show(self, ui);
             // What went wrong while presenting (a widget's plugin failing) shows over it.
@@ -1284,7 +1294,6 @@ impl FigApp {
             return;
         }
         if !self.has_files() || self.ui.home {
-            tabs::tab_bar(self, ui);
             home::show(self, ui);
             dialogs::keys(self, &ctx);
             dialogs::show(self, &ctx);
@@ -1293,7 +1302,6 @@ impl FigApp {
             return;
         }
         let hidden = self.session.ds().map(|d| d.view.ui_hidden).unwrap_or(false);
-        tabs::tab_bar(self, ui);
         if !hidden {
             egui::Panel::left("left_rail")
                 .exact_size(56.0)
@@ -1456,7 +1464,7 @@ impl FigApp {
             "focus": {"region": self.ui.nav.region.id(), "keyboard": self.ui.nav.keyboard},
             "reduceMotion": self.reduce_motion(),
             "presenting": self.ui.present.is_some(),
-            "presenter": self.ui.present.as_ref().map(present::Presenter::inspect),
+            "presenter": self.ui.present.as_ref().or(self.ui.paused_present.as_ref()).map(present::Presenter::inspect),
             "presentOptions": {"scale": self.ui.present_view.scale.id(), "deviceFrame": self.ui.present_view.device_frame, "comments": self.ui.present_view.comments, "hotspotHints": self.ui.present_view.hotspot_hints, "inspect": self.ui.present_view.inspect},
             "preview": self.ui.preview.as_ref().map(|p| p.player.inspect()),
             "mainMenu": self.ui.main_menu,
