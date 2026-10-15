@@ -34,6 +34,9 @@ pub const UI_COMMANDS: &[&str] = &[
 /// or text from another app); otherwise our copied layers. `event_text` is the text the platform
 /// handed over with the paste event (the browser has no other way to read it).
 pub fn paste(app: &mut FigApp, event_text: Option<&str>) {
+    if dev_mode_refuses(app, "edit.paste") {
+        return;
+    }
     let sys_text = app.services.clipboard_get_text().or_else(|| event_text.map(str::to_string)).filter(|t| !t.is_empty());
     let ours = sys_text.is_some() && sys_text == app.ui.last_copy;
     let (cx, cy) = app.session.ds().map(|d| (d.view.cx, d.view.cy)).unwrap_or((0.0, 0.0));
@@ -73,7 +76,22 @@ fn clipboard_png(app: &mut FigApp) -> Option<(Vec<u8>, u32, u32)> {
     Some((out.into_inner(), w, h))
 }
 
+/// Dev Mode (the Inspect tab) refuses command `id` from the menus, shortcuts and clipboard: it
+/// edits the design ([`figcraft_engine::devinspect::dev_mode_allows`]). Says so when it does.
+/// shortcut: the layers panel (rename, reorder, hide, lock) and files dropped on the canvas still
+/// edit in Dev Mode; route them through here if people trip over it.
+pub fn dev_mode_refuses(app: &mut FigApp, id: &str) -> bool {
+    let refused = app.ui.right_tab == crate::RightTab::Inspect && !figcraft_engine::devinspect::dev_mode_allows(id);
+    if refused {
+        app.toast(tr("Dev Mode only inspects: switch to Design (Shift+D) to edit"));
+    }
+    refused
+}
+
 pub fn invoke(app: &mut FigApp, id: &str) {
+    if dev_mode_refuses(app, id) {
+        return;
+    }
     match id {
         "file.open" => app.open_dialog(),
         "plugin.import" => crate::plugins_ui::import_dialog(app),

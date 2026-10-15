@@ -86,7 +86,7 @@ native speakers' reviews of the six language drafts need people.
 | Styles & variables | 95% | 76% | 2–4 | [components-parity](docs/components-parity.md) |
 | Prototyping | 92% | 74% | 2–5 | [prototyping-parity](docs/prototyping-parity.md) |
 | Import/export | 86% | 58% | 5–10 | [file-format-parity](docs/file-format-parity.md) |
-| Dev Mode / inspect | 96% | 72% | 0–1 | [dev-mode-parity](docs/dev-mode-parity.md) |
+| Dev Mode / inspect | 97% | 76% | 2–4 | [dev-mode-parity](docs/dev-mode-parity.md) |
 | Comments, versions, misc | 87% | 63% | 1–3 | [collaboration-parity](docs/collaboration-parity.md) |
 | Multiplayer & sharing | 17% | 5% | 42–84 | [collaboration-parity](docs/collaboration-parity.md) |
 | Plugins & widgets | 60% | 35% | 8–26 | [plugins](docs/plugins.md) |
@@ -131,6 +131,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Progress log
 
+- **2026-10-15** · Dev Mode tail (M6, gap 16): generated layer trees start with the import lines of the connected components they call, once each per language; Compare changes takes any saved version as the before; a behaviour suite made the Dev Mode canvas inspect-only (no moving, resizing, drawing or editing; menus and shortcuts refuse design edits with a note), added Changed to the ready list and refused statuses on layers inside frames; read-only plugins show their panels from the Inspect tab. Dev Mode 97% / 76%.
 - **2026-10-14** · Corner handles win over the corner-radius handles (M1, #292): a press on the inner half of a corner handle's square picked the radius handle 10 px in, so the drag neither resized nor (dragging outward) rounded anything. Inside the drawn square the corner now resizes both sides (in ratio with Shift or the link); further in the radius handle still answers. Regression test in the transform behaviour suite. Numbers unchanged.
 - **2026-10-14** · Home screen recent files as cards (M7): each card shows the picture its file carries on its first page's colour, the file's icon, name and "Edited ... ago"; sort by name, creation or last change either way; a table view; a click selects, a double-click or Enter opens, arrow keys move; Open, Show in folder and Remove from recents on right-click. Numbers unchanged.
 - **2026-10-13** · Vector edit mode regions (M4): with the Move tool, the filled area under the pointer is hatched with "/" lines in the selection colour, clipped by the area's own fill rule so holes stay clear; the hatch goes near points (3.5 px) and segments (2 px), and its spacing follows octave folding (8 px at every power-of-two zoom), fixed to the shape. A click selects the area with its points (they move with it but keep the unselected look), Shift adds or removes one, a press on a selected area drags the whole selection as one undo step, and a click on an empty spot clears the areas and stays in edit mode. `vector.edit.select {regions}` and `vector.edit.state` (`regions`, `regionVertices`, `regionHover`); `vector_regions_tests` and `regions_tests`. Numbers unchanged.
@@ -313,6 +314,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Dev Mode tail (M6, gap 16): import lines for connected components inside generated layer trees (definitions, slots and swapped-in instances too); `dev.compare {version}` and the compare view's Compare with menu compare with any saved version; behaviour suite (5 tests; 4 failed before the fixes): an inspect-only Dev Mode canvas with menus, shortcuts, nudges, opacity keys and paste refusing design edits, toolbar drawing tools returning to the design, Changed in the ready list (`inspect.readyForDev {status: changed}`), statuses only on sections and top-level frames; read-only plugins' panels from the Inspect tab. Dev Mode 96%/72% → 97%/76%, 0–1 h → 2–4 h (measurements kept on the canvas and a read-only layers panel counted as missing); header totals not recomputed |
 | 2026-10-15 | minor | Typography spacing icons scrub with the shared number-field gesture, modifier rates and one Undo step per drag (#373). Units and selected-character targeting are preserved. Numbers unchanged. |
 | 2026-10-14 | minor | System theme on first run (M7): preferences without a theme default to System; the first frame reads the OS appearance directly, including when returning from a manual theme. Saved Light/Dark choices stay explicit; unavailable OS appearance falls back to Light. Numbers unchanged. |
 | 2026-10-14 | minor | Home screen recent files as cards (M7): each card shows the picture its file carries on its first page's colour, the file's icon, name and "Edited ... ago"; sort by name, creation or last change either way; a table view; a click selects, a double-click or Enter opens, arrow keys move; Open, Show in folder and Remove from recents on right-click. Numbers unchanged. |
