@@ -101,6 +101,8 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: packaging/macos/import-cert.sh
+      - name: DMG signature round trip (ad-hoc fixture)
+        run: bash packaging/macos/dmg-test.sh
       - name: Build, sign, notarize
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -111,7 +113,8 @@ jobs:
         run: packaging/macos/package.sh --arch universal
       # Unpacks the CLI zip and checks the binary users get: Developer ID, hardened runtime,
       # timestamp, and Gatekeeper's notarization lookup (codesign --verify, spctl). Also the DMG's
-      # stapled ticket. Strict when the signing secrets are present, warnings otherwise.
+      # stapled ticket and the app inside the image and after copying out. Signature integrity
+      # is always required; Developer ID and notarization checks are strict with signing secrets.
       - name: Verify signatures and notarization
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
