@@ -10,8 +10,11 @@ use std::fmt;
 
 /// Deepest struct/message nesting decoded.
 const MAX_DEPTH: usize = 64;
-/// Most values decoded from one message (every scalar, array element and field counts).
-const MAX_VALUES: usize = 20_000_000;
+/// Most values decoded from one message (every scalar, array element and field counts): at least
+/// [`MIN_VALUES`], and one per [`BYTES_PER_VALUE`] bytes of the message, so a large real file
+/// decodes while a small one still can't expand into a huge tree.
+const MIN_VALUES: usize = 20_000_000;
+const BYTES_PER_VALUE: usize = 4;
 /// Most definitions in a schema, and fields in one definition.
 const MAX_DEFS: usize = 10_000;
 const MAX_FIELDS: usize = 10_000;
@@ -286,9 +289,14 @@ impl Schema {
 
     /// Decode a message of definition `root`.
     pub fn decode_message<'s>(&'s self, root: usize, data: &[u8]) -> Result<Kv<'s>, KiwiError> {
-        let mut d = Decoder { schema: self, r: Reader { data, pos: 0 }, budget: MAX_VALUES };
+        let mut d = Decoder { schema: self, r: Reader { data, pos: 0 }, budget: value_budget(data.len()) };
         d.def(root, 0)
     }
+}
+
+/// Most values decoded from a message of `len` bytes.
+pub(crate) fn value_budget(len: usize) -> usize {
+    MIN_VALUES.max(len / BYTES_PER_VALUE)
 }
 
 struct Decoder<'s, 'b> {
@@ -327,6 +335,8 @@ impl<'s> Decoder<'s, '_> {
                 loop {
                     let id = self.r.var_uint()?;
                     if id == 0 {
+                        // Grown by doubling: trimmed, a large file's tree takes a good part less.
+                        out.shrink_to_fit();
                         return Ok(Kv::Object(out));
                     }
                     let f = d.fields.iter().find(|f| f.value == id).ok_or_else(|| KiwiError(format!("message: {} has no field {id}", d.name)))?;
