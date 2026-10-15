@@ -27,3 +27,7 @@ display_name = "VanTan"
 [people.Silvertree2010]
 display_name = "Netter"
 sync_github_name = false
+
+[people.hakifx]
+display_name = "Elias"
+consent_source = "Explicit owner request in the FigCraft contribution PR chat, 2026-10-15: Use Elias."
