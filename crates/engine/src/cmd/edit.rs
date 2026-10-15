@@ -23,6 +23,13 @@ pub fn specs() -> Vec<CommandSpec> {
             duplicate
         ),
         spec!("edit.copy", "Copy", "{ids?}", false, copy),
+        spec!(
+            "edit.copyForEffectCraft",
+            "Copy for EffectCraft",
+            "{ids?} → {format, version, nodes, warnings, assets}; native editable snapshot with embedded images, at most 64 MiB",
+            false,
+            crate::effectcraft_clipboard::copy
+        ),
         spec!("edit.cut", "Cut", "{ids?}", true, cut),
         spec!("edit.paste", "Paste", "{parent?, x?, y? (page coordinates of the pasted top-left)}", true, paste),
         spec!("edit.pasteOver", "Paste over selection", "{}", true, paste_over),

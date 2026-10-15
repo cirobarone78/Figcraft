@@ -8,6 +8,10 @@ name = "Español"
 status = "draft — needs native review"
 
 [ui]
+"Copied normally; editable EffectCraft data could not be included" = "Copiado normalmente; no se pudieron incluir los datos editables de EffectCraft"
+"Copied for EffectCraft — {count} warning(s): {warnings}" = "Copiado para EffectCraft — {count} advertencia(s): {warnings}"
+"Copied for EffectCraft" = "Copiado para EffectCraft"
+"Copy for EffectCraft" = "Copiar para EffectCraft"
 
 "% of all commits" = "% del total de commits"
 "(no longer published)" = "(ya no publicado)"
@@ -1589,6 +1593,7 @@ status = "draft — needs native review"
 "⌥ drag" = "⌥ arrastrar"
 
 [commands]
+"edit.copyForEffectCraft" = "Copiar para EffectCraft"
 "align.bottom" = "Alinear abajo"
 "align.hcenter" = "Alinear centros horizontales"
 "align.left" = "Alinear a la izquierda"
@@ -2148,6 +2153,7 @@ status = "draft — needs native review"
 "template.list" = "Listar plantillas"
 
 [menu]
+"edit.copyForEffectCraft" = "EffectCraft"
 "bool.exclude" = "Excluir"
 "bool.flatten" = "Acoplar"
 "bool.intersect" = "Intersecar"
