@@ -1,4 +1,4 @@
-//! Localhost JSON-lines control server: each line `{"id", "method", "params"}` is queued for the UI
+//! Localhost JSON-lines control server: each line `{"id", "method", "params", "token"}` is authenticated then queued for the UI
 //! thread; the reply line `{"id", "ok", "result" | "error"}` is written when the frame handled it.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -26,7 +26,7 @@ pub fn drain_queue(queue: &Queue, target: &mut Vec<ControlRequest>) {
     target.extend(queue.drain(..count));
 }
 
-pub fn start(port: u16, queue: Queue, ctx: CtxSlot) {
+pub fn start(port: u16, token: figcraft_collab_net::control_auth::ControlToken, queue: Queue, ctx: CtxSlot) {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
@@ -39,7 +39,7 @@ pub fn start(port: u16, queue: Queue, ctx: CtxSlot) {
     let spawned = std::thread::Builder::new().name("figcraft-control".into()).spawn(move || {
         let mut workers = Vec::new();
         for stream in listener.incoming().flatten() {
-            spawn_connection(stream, queue.clone(), ctx.clone(), &mut workers, TIMEOUT);
+            spawn_connection(stream, token.clone(), queue.clone(), ctx.clone(), &mut workers, TIMEOUT);
         }
     });
     if let Err(e) = spawned {
@@ -47,20 +47,33 @@ pub fn start(port: u16, queue: Queue, ctx: CtxSlot) {
     }
 }
 
-fn spawn_connection(stream: TcpStream, queue: Queue, ctx: CtxSlot, workers: &mut Vec<std::thread::JoinHandle<()>>, timeout: Duration) {
+fn spawn_connection(
+    stream: TcpStream,
+    token: figcraft_collab_net::control_auth::ControlToken,
+    queue: Queue,
+    ctx: CtxSlot,
+    workers: &mut Vec<std::thread::JoinHandle<()>>,
+    timeout: Duration,
+) {
     workers.retain(|worker| !worker.is_finished());
     if workers.len() >= MAX_CONNECTIONS {
         return;
     }
     match std::thread::Builder::new().name("figcraft-control-conn".into()).spawn(move || {
-        let _ = serve(stream, queue, ctx, timeout);
+        let _ = serve(stream, token, queue, ctx, timeout);
     }) {
         Ok(worker) => workers.push(worker),
         Err(e) => log::error!("control connection thread: {e}"),
     }
 }
 
-fn serve(mut out: TcpStream, queue: Queue, ctx: CtxSlot, timeout: Duration) -> std::io::Result<()> {
+fn serve(
+    mut out: TcpStream,
+    token: figcraft_collab_net::control_auth::ControlToken,
+    queue: Queue,
+    ctx: CtxSlot,
+    timeout: Duration,
+) -> std::io::Result<()> {
     out.set_read_timeout(Some(timeout))?;
     out.set_write_timeout(Some(timeout))?;
     let mut reader = BufReader::new(out.try_clone()?);
@@ -77,41 +90,50 @@ fn serve(mut out: TcpStream, queue: Queue, ctx: CtxSlot, timeout: Duration) -> s
             writeln!(out, "{}", json!({"id": null, "ok": false, "error": "message too large"}))?;
             break;
         }
-        let Ok(line) = std::str::from_utf8(&line) else { break };
+        let Ok(line) = std::str::from_utf8(&line) else {
+            writeln!(out, "{}", json!({"id": null, "ok": false, "error": "bad JSON"}))?;
+            break;
+        };
         if line.trim().is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(line) {
-            Ok(v) => {
-                let id = v.get("id").cloned().unwrap_or(Value::Null);
-                let method = v.get("method").and_then(Value::as_str).unwrap_or("").to_string();
-                let params = v.get("params").cloned().unwrap_or(json!({}));
-                let (tx, rx) = std::sync::mpsc::channel();
-                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let mut pending = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                pending.retain(|request| !request.is_cancelled());
-                if pending.len() >= MAX_QUEUED_REQUESTS {
-                    drop(pending);
-                    writeln!(out, "{}", json!({"id": id, "ok": false, "error": "control request queue is full"}))?;
-                    continue;
-                }
-                pending.push(ControlRequest { id: id.clone(), method, params, reply: tx, cancelled: cancelled.clone() });
-                drop(pending);
-                if let Some(c) = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-                    c.request_repaint();
-                }
-                match rx.recv_timeout(timeout) {
-                    Ok(r) => match r.result {
-                        Ok(res) => json!({"id": r.id, "ok": true, "result": res}),
-                        Err(e) => json!({"id": r.id, "ok": false, "error": e}),
-                    },
-                    Err(_) => {
-                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-                        json!({"id": id, "ok": false, "error": "timed out waiting for the UI (is the window visible?)"})
-                    }
-                }
+        let v = match serde_json::from_str::<Value>(line) {
+            Ok(v) => v,
+            Err(_) => {
+                writeln!(out, "{}", json!({"id": null, "ok": false, "error": "bad JSON"}))?;
+                break;
             }
-            Err(e) => json!({"id": null, "ok": false, "error": format!("bad JSON: {e}")}),
+        };
+        if !v.get("token").and_then(Value::as_str).is_some_and(|presented| token.matches(presented)) {
+            writeln!(out, "{}", json!({"id": null, "ok": false, "error": "unauthorized"}))?;
+            break;
+        }
+        let id = v.get("id").cloned().unwrap_or(Value::Null);
+        let method = v.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+        let params = v.get("params").cloned().unwrap_or(json!({}));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut pending = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.retain(|request| !request.is_cancelled());
+        if pending.len() >= MAX_QUEUED_REQUESTS {
+            drop(pending);
+            writeln!(out, "{}", json!({"id": id, "ok": false, "error": "control request queue is full"}))?;
+            continue;
+        }
+        pending.push(ControlRequest { id: id.clone(), method, params, reply: tx, cancelled: cancelled.clone() });
+        drop(pending);
+        if let Some(c) = ctx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+            c.request_repaint();
+        }
+        let reply = match rx.recv_timeout(timeout) {
+            Ok(r) => match r.result {
+                Ok(res) => json!({"id": r.id, "ok": true, "result": res}),
+                Err(e) => json!({"id": r.id, "ok": false, "error": e}),
+            },
+            Err(_) => {
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                json!({"id": id, "ok": false, "error": "timed out waiting for the UI (is the window visible?)"})
+            }
         };
         writeln!(out, "{reply}")?;
     }

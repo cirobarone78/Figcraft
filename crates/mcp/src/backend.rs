@@ -93,6 +93,7 @@ pub fn decode_data(v: &Value) -> Result<Vec<u8>, String> {
 /// A running FigCraft app, reached through its loopback control port (`figcraft --control PORT`).
 pub struct Attached {
     addr: String,
+    token: figcraft_collab_net::control_auth::ControlToken,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
     next_id: u64,
 }
@@ -100,12 +101,17 @@ pub struct Attached {
 impl Attached {
     /// Connect to `addr` (e.g. `127.0.0.1:7979`), failing fast when nothing is listening.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
-        let mut r = Self { addr: addr.to_string(), conn: None, next_id: 1 };
+        Self::connect_with_token(addr, figcraft_collab_net::control_auth::ControlToken::from_env()?)
+    }
+
+    /// Connect with an explicit validated token.
+    pub fn connect_with_token(addr: &str, token: figcraft_collab_net::control_auth::ControlToken) -> std::io::Result<Self> {
+        let mut r = Self { addr: addr.to_string(), token, conn: None, next_id: 1 };
         r.reconnect()?;
         Ok(r)
     }
 
-    /// Connect to `127.0.0.1:port`.
+    /// Connect to 127.0.0.1:port.
     pub fn port(port: u16) -> std::io::Result<Self> {
         Self::connect(&format!("127.0.0.1:{port}"))
     }
@@ -117,7 +123,14 @@ impl Attached {
     fn reconnect(&mut self) -> std::io::Result<()> {
         self.conn = None;
         let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, format!("cannot resolve {}", self.addr));
-        for sa in self.addr.to_socket_addrs()? {
+        let addresses: Vec<_> = self.addr.to_socket_addrs()?.collect();
+        if addresses.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("cannot resolve {}", self.addr)));
+        }
+        if addresses.iter().any(|sa| !sa.ip().is_loopback()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "attached control connections require loopback addresses"));
+        }
+        for sa in addresses {
             match TcpStream::connect_timeout(&sa, Duration::from_millis(800)) {
                 Ok(s) => {
                     s.set_nodelay(true).ok();
@@ -165,7 +178,7 @@ impl Backend for Attached {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
-        let line = json!({"id": id, "method": method, "params": params}).to_string();
+        let line = json!({"id": id, "method": method, "params": params, "token": self.token.as_str()}).to_string();
         if self.conn.is_none() || self.stale() {
             self.reconnect().map_err(|e| {
                 format!("FigCraft app at {} is not reachable: {e} (request was not sent; start it with `figcraft --control PORT`)", self.addr)

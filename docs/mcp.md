@@ -17,7 +17,15 @@ The server lives in `crates/mcp` (`figcraft-mcp`) and is started by the CLI:
 | `figcraft-cli mcp` | **Headless**: an in-process engine session with one untitled document. No window; renders with the CPU renderer. |
 | `figcraft-cli mcp --attach <port>` | **Attached**: drives a running FigCraft app through its control channel (`figcraft --control <port>`). The user sees every change live. |
 
-`--attach` also takes `host:port`. The control channel only listens on 127.0.0.1.
+`--attach` also takes `host:port`. The app listens on 127.0.0.1 only. Attached clients resolve the target once per connection and reject before dialing if any resolved address is non-loopback; remote hosts and DNS names with any remote result are refused.
+
+Attached mode now requires `FIGCRAFT_CONTROL_TOKEN` in both the desktop app and `figcraft-cli` process environments. Set one fresh, random token in the launching shell before starting either process; use at least 128 random bits. For example, PowerShell:
+
+```powershell
+$env:FIGCRAFT_CONTROL_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Keep this variable in that shell's process environment; do not use `setx` or put the token on a command line. The accepted value is 22–128 URL-safe ASCII characters. Headless `figcraft-cli mcp` needs no token. The token prevents access by local processes without it, but same-user malware that can inspect process environments can read it too.
 
 Attached calls are never automatically replayed after a transport failure: the app may have
 applied the request before its reply was lost. The error reports that the operation may have
@@ -48,7 +56,7 @@ The Linux AppImage bundles the CLI: `FigCraft.AppImage cli <args>` runs `figcraf
 ```sh
 # headless
 claude mcp add figcraft -- /path/to/figcraft-cli mcp
-# drive the running app (start it with: figcraft --control 7979)
+# drive the running app (both processes inherit FIGCRAFT_CONTROL_TOKEN; start app with: figcraft --control 7979)
 claude mcp add figcraft-app -- /path/to/figcraft-cli mcp --attach 7979
 ```
 

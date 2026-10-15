@@ -131,7 +131,7 @@ machines.
 ### `mcp [--attach PORT]`
 
 Serve MCP on stdio: headless by default, or attached to a running app started with
-`figcraft --control PORT`. See [mcp.md](mcp.md). The headless session can host, join and publish
+`figcraft --control PORT`. Attached mode requires the same `FIGCRAFT_CONTROL_TOKEN` in the app and CLI process environments; headless mode remains token-free. See [mcp.md](mcp.md) for setup. The headless session can host, join and publish
 live sessions (`collab.*`: without a key on a server open to the public, with `collab.serverInfo`,
 `collab.manageFile` for the owner token and `collab.report`) and use plugin directories
 (`plugin.directory.*`); the one-shot `run` can't (no network link).

@@ -23,7 +23,7 @@ USAGE:
   figcraft-cli render <file> -o <out.png> [--scale N] [--page NAME]
   figcraft-cli run <script.json|script.jsonl> [--in <file>] [--out <file>]
   figcraft-cli commands [--json] [--filter TEXT]
-  figcraft-cli mcp [--attach PORT]
+  figcraft-cli mcp [--attach PORT]  (FIGCRAFT_CONTROL_TOKEN required for --attach)
   figcraft-cli plugin publish <folder> --server ws://host:port/[?key=KEY]
   figcraft-cli perf [--layers N[,N...]] [--instances N[,N...]]
   figcraft-cli help | --help | --version

@@ -3,22 +3,29 @@
 The desktop app can be driven by other programs (tests, scripts, `figcraft-cli mcp --attach`,
 sibling Crafting Apps) through a loopback socket:
 
-```sh
+```bash
+export FIGCRAFT_CONTROL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 cargo run -p figcraft -- --control 7979 [file.figcraft|file.svg|image]
 ```
 
-The app listens on `127.0.0.1:<port>` only. Each connection carries **newline-delimited JSON**:
-one request object per line, one reply line per request, in order.
+The app listens on `127.0.0.1:<port>` only. Starting it with `--control` or `FIGCRAFT_CONTROL_PORT` requires `FIGCRAFT_CONTROL_TOKEN`. The quick start creates a fresh 256-bit token; the app and every attached client must inherit that same value. The token must contain 22–128 URL-safe ASCII characters; the app does not log its value. Do not put it on a command line or use `setx`. Headless MCP mode does not use this token. It protects the listener from local processes without the secret; same-user malware that can read process environments can read it too.
+
+Each connection carries **newline-delimited JSON**:
+one request object per line, one reply line per request, in order. The top-level `token` must be present and valid on every request. A missing or wrong token receives a generic `unauthorized` reply and closes the connection; malformed nonempty JSON also closes it after the error reply.
+
+```bash
+printf '{"id":1,"method":"ui.inspect","params":{},"token":"%s"}\n' "$FIGCRAFT_CONTROL_TOKEN"
+```
 
 ```text
-request:  {"id": 1, "method": "engine.execute", "params": {...}}
+request:  {"id": 1, "method": "engine.execute", "params": {...}, "token": "<FIGCRAFT_CONTROL_TOKEN>"}
 reply:    {"id": 1, "ok": true, "result": ...}
           {"id": 1, "ok": false, "error": "message"}
 ```
 
 Requests are queued and run on the UI thread at the start of the next frame, so replies reflect the
 real UI state. A request that the UI doesn't answer within 60 s gets a timeout error. A line that is
-not JSON gets `{"id": null, "ok": false, "error": "bad JSON: …"}`. The implementation is in
+not JSON gets `{"id": null, "ok": false, "error": "bad JSON"}`. The implementation is in
 `crates/ui-egui/src/control.rs` (methods) and `apps/figcraft/src/control_server.rs` (socket).
 
 A request line is limited to **32 MiB before the newline**, including whitespace. The reader stops
@@ -54,10 +61,10 @@ calls never open dialogs: dialog requests are dropped. Returns the command's res
 commands return `{"id": N}`).
 
 ```json
-{"id":1,"method":"engine.execute","params":{"command":"shape.rectangle","params":{"x":10,"y":10,"width":100,"height":50}}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":1,"method":"engine.execute","params":{"command":"shape.rectangle","params":{"x":10,"y":10,"width":100,"height":50}}}
 {"id":1,"ok":true,"result":{"id":2}}
-{"id":2,"method":"engine.execute","params":{"command":"node.set","params":{"ids":[2],"props":{"fill":"#FF6B6B","cornerRadius":8}}}}
-{"id":3,"method":"engine.execute","params":{"command":"command.batch","params":{"label":"Tidy","commands":[{"command":"align.left","params":{"ids":[2,3]}},{"command":"distribute.vertical","params":{"ids":[2,3]}}]}}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":2,"method":"engine.execute","params":{"command":"node.set","params":{"ids":[2],"props":{"fill":"#FF6B6B","cornerRadius":8}}}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":3,"method":"engine.execute","params":{"command":"command.batch","params":{"label":"Tidy","commands":[{"command":"align.left","params":{"ids":[2,3]}},{"command":"distribute.vertical","params":{"ids":[2,3]}}]}}}
 ```
 
 ### `engine.commands {}`
@@ -144,8 +151,8 @@ tools, a press on a frame's or section's name label (as the canvas last drew it,
 frame's top edge) selects and drags that frame.
 
 ```json
-{"id":4,"method":"engine.execute","params":{"command":"tool.set","params":{"tool":"ellipse"}}}
-{"id":5,"method":"ui.pointer","params":{"kind":"drag","x":200,"y":200,"to":[300,260],"shift":true}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":4,"method":"engine.execute","params":{"command":"tool.set","params":{"tool":"ellipse"}}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":5,"method":"ui.pointer","params":{"kind":"drag","x":200,"y":200,"to":[300,260],"shift":true}}
 ```
 
 ### `ui.key {key, shift?, alt?, cmd?, ctrl?}`
@@ -181,9 +188,9 @@ arrive in the same frame, so send a press and its release (or a double-click's t
 separate calls. Returns `{queued}`.
 
 ```json
-{"id":6,"method":"ui.input","params":{"events":[{"move":[1000,315]}]}}
-{"id":7,"method":"ui.input","params":{"events":[{"down":[1000,315]}]}}
-{"id":8,"method":"ui.input","params":{"events":[{"up":[1000,315]}]}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":6,"method":"ui.input","params":{"events":[{"move":[1000,315]}]}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":7,"method":"ui.input","params":{"events":[{"down":[1000,315]}]}}
+{"token":"<FIGCRAFT_CONTROL_TOKEN>", "id":8,"method":"ui.input","params":{"events":[{"up":[1000,315]}]}}
 ```
 
 ### `ui.menu.invoke {id}`
@@ -273,13 +280,17 @@ Close the app (every window, without asking about unsaved changes).
 
 ## Example session (shell)
 
-```sh
+The app and client inherit the token from this Bash shell. Once the desktop window is ready, continue with the socket commands.
+
+```bash
+export FIGCRAFT_CONTROL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 port=7979
-figcraft --control $port &
+figcraft --control "$port" &
+# Wait until the desktop window is ready before continuing.
 exec 3<>/dev/tcp/127.0.0.1/$port
-echo '{"id":1,"method":"engine.execute","params":{"command":"frame.create","params":{"preset":"iPhone 16","x":0,"y":0}}}' >&3
+printf '{"id":1,"method":"engine.execute","params":{"command":"frame.create","params":{"preset":"iPhone 16","x":0,"y":0}},"token":"%s"}\n' "$FIGCRAFT_CONTROL_TOKEN" >&3
 read -r reply <&3; echo "$reply"
-echo '{"id":2,"method":"ui.screenshot","params":{"path":"/tmp/figcraft.png"}}' >&3
+printf '{"id":2,"method":"ui.screenshot","params":{"path":"/tmp/figcraft.png"},"token":"%s"}\n' "$FIGCRAFT_CONTROL_TOKEN" >&3
 read -r reply <&3; echo "$reply"
 ```
 
