@@ -249,6 +249,7 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     }
     crate::dev_mode::draw(app, &painter);
     crate::handles::draw(app, &painter);
+    crate::selection_spacing::draw(app, &painter);
     crate::comments::draw(app, &painter);
     crate::live_text::draw(app, &painter);
     crate::live::draw(app, &painter, &ctx);
@@ -414,6 +415,9 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
     let typing_elsewhere = crate::a11y::field_focused(&ctx);
     app.canvas.space_pan = space && !editing_text && !typing_elsewhere;
+    if !app.canvas.dragging && crate::selection_spacing::input(app, &ctx, hover_pos, resp.hovered(), app.canvas.space_pan) {
+        return false;
+    }
     // Dropped files import onto the canvas.
     let dropped = ctx.input(|i| i.raw.dropped_files.clone());
     for f in dropped {

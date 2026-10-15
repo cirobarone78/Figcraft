@@ -49,6 +49,7 @@ pub mod render_worker;
 pub mod right;
 pub mod scale_panel;
 pub mod section_panel;
+mod selection_spacing;
 pub mod shortcuts;
 pub mod shortcuts_panel;
 pub mod style_picker;
@@ -1264,6 +1265,7 @@ impl FigApp {
         // Control requests run first so their results reflect this frame.
         control::drain(self, &ctx);
         windows::requests(self, &ctx);
+        selection_spacing::sync(self, &ctx);
         // Before any widget: the navigation keys (F6, Tab, arrows, Escape) move the keyboard.
         a11y::begin(self, &ctx);
         if self.ui.title_bar == TitleBar::Custom {
@@ -1506,6 +1508,9 @@ impl FigApp {
         })
     }
 }
+
+#[cfg(test)]
+mod selection_spacing_tests;
 
 #[cfg(test)]
 mod typography_scrub_tests;

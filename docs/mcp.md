@@ -1519,6 +1519,18 @@ the instance's text layer id with `get_node`):
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"type_text","arguments":{"id":7,"text":"Grace Hopper"}}}
 ```
 
+Smart-selection spacing (movable siblings in rows, columns or aligned grids):
+
+```json
+{"jsonrpc":"2.0","id":"spacing","method":"tools/call","params":{"name":"run_command","arguments":{"command":"arrange.spacing","params":{"ids":[3,4,5],"horizontal":24}}}}
+```
+
+`horizontal` and `vertical` are optional page-unit gaps (at least one is required, magnitude at
+most 1,000,000). The first column/row stays fixed; subsequent tracks move without changing sizes,
+parents or offsets inside each track. Nonuniform gaps become uniform. Normal auto-layout flow
+children, locked/hidden layers and instance internals are excluded. Interactive callers may pass
+`fromGesture: true` inside an interaction to keep using its original tracks during a scrub.
+
 Align and distribute as one undo step:
 
 ```json
