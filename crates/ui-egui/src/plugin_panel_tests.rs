@@ -3,7 +3,7 @@
 //! open panel draws no frames while nothing changes.
 
 use base64::Engine as _;
-use egui::Pos2;
+use egui::{Id, Pos2};
 use figcraft_engine::Session;
 use serde_json::{Value, json};
 
@@ -117,4 +117,88 @@ fn a_colour_field_opens_the_colour_picker_and_two_panels_show_side_by_side() {
     u.frame(vec![]);
     let accents = nodes(&mut u).iter().filter(|(_, n)| n.label() == Some("Accent")).count();
     assert_eq!((accents, u.app.session.plugins.panels.len()), (2, 2), "both panels are drawn");
+}
+
+/// A session with a plugin whose command asks for a menu choice and a colour first.
+fn form_session() -> Session {
+    let manifest = json!({"id": "org.test.form", "name": "Form test", "main": "p.wasm", "api": 2, "permissions": {"access": "write"},
+    "commands": [{"id": "run", "label": "Run", "params": [
+        {"name": "shape", "label": "Shape", "type": "select", "options": ["Square", "Circle"], "default": "Square"},
+        {"name": "accent", "label": "Accent", "type": "color", "default": "#FF5A5F"}
+    ]}]});
+    let wasm = base64::engine::general_purpose::STANDARD.encode(panel_module());
+    let mut s = Session::new();
+    s.execute("plugin.import", &json!({"manifest": manifest, "wasm": wasm})).unwrap();
+    s
+}
+
+/// The middle of the control named `label` in the last frame's accessibility tree.
+fn centre_of(u: &mut Ui, label: &str) -> Pos2 {
+    let nodes = u.frame_output(vec![]).platform_output.accesskit_update.unwrap().nodes;
+    let b = nodes
+        .iter()
+        .map(|(_, n)| n)
+        .find(|n| n.label() == Some(label))
+        .and_then(|n| n.bounds())
+        .unwrap_or_else(|| panic!("no control named {label:?}"));
+    Pos2::new(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)
+}
+
+#[test]
+fn popups_opened_from_the_modal_parameters_form_draw_above_its_backdrop_and_answer_the_pointer() {
+    let mut u = Ui::new(form_session());
+    u.ctx.enable_accesskit();
+    u.app.ui.home = false;
+    crate::plugins_ui::start(&mut u.app, "org.test.form", "run");
+    u.frame(vec![]);
+    assert!(u.app.ui.plugin_form.is_some(), "the form is open");
+    let form = Id::new("plugin_form");
+    assert!(u.ctx.memory(|m| m.area_rect(form)).is_some(), "the form card is drawn");
+    // The topmost layer a window or popup is on (tooltips and the like are above it by their order).
+    let top_layer = |u: &Ui| u.ctx.memory(|m| m.layer_ids().filter(|l| l.order == egui::Order::Foreground).last()).unwrap();
+
+    // A menu opened from the form is a popup above the card.
+    let shape = centre_of(&mut u, "Shape");
+    u.button(shape, true);
+    u.button(shape, false);
+    u.frame(vec![]);
+    let menu_item = top_layer(&u);
+    assert_ne!(menu_item.id, form, "the open menu is above the card: {menu_item:?}");
+    assert_eq!(menu_item.order, egui::Order::Foreground);
+    let circle = centre_of(&mut u, "Circle");
+    assert_eq!(u.ctx.layer_id_at(circle), Some(menu_item), "the menu, not the backdrop, is under the pointer");
+    u.button(circle, true);
+    u.button(circle, false);
+    u.frame(vec![]);
+    assert_eq!(u.app.ui.plugin_form.as_ref().unwrap().values["shape"], "Circle", "an entry of the menu can be chosen");
+
+    // The colour picker opened from the form is above the card and its backdrop, and stays there
+    // when the card is clicked (a clicked window comes to the front).
+    let swatch = centre_of(&mut u, "Color");
+    u.button(swatch, true);
+    u.button(swatch, false);
+    // egui lays a new window out invisibly on its first frame.
+    u.frame(vec![]);
+    u.frame(vec![]);
+    assert!(u.app.ui.picker.is_some(), "the swatch opened the picker");
+    let picker = crate::colorpicker::form_layer();
+    let picker_rect = u.ctx.memory(|m| m.area_rect(picker.id)).expect("the picker is drawn");
+    assert_eq!(u.ctx.layer_id_at(picker_rect.center()), Some(picker), "the picker, not the backdrop, is under the pointer");
+    assert_eq!(top_layer(&u), picker);
+    // The card's margin, where the picker does not cover it and no control is.
+    let card = u.ctx.memory(|m| m.area_rect(form)).unwrap();
+    let margin = Pos2::new(card.max.x - 8.0, card.center().y);
+    assert!(!picker_rect.contains(margin));
+    u.button(margin, true);
+    u.button(margin, false);
+    u.frame(vec![]);
+    assert_eq!(top_layer(&u), picker, "clicking the card leaves the picker on top");
+
+    // And it answers the pointer: its close button closes it, and the form stays open.
+    let close = Pos2::new(picker_rect.max.x - 20.0, picker_rect.min.y + 20.0);
+    u.button(close, true);
+    u.button(close, false);
+    u.frame(vec![]);
+    assert!(u.app.ui.picker.is_none(), "the picker closed");
+    assert!(u.app.ui.plugin_form.is_some(), "the form is still open");
 }

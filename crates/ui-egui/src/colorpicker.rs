@@ -423,6 +423,26 @@ fn alpha_slider(ui: &mut Ui, rect: Rect, color: Color) -> Option<(f32, bool)> {
     slider_knob(ui, rect, color.a, Id::new("cp_alpha"))
 }
 
+/// The picker's window id.
+fn picker_id() -> egui::Id {
+    egui::Id::new("color_picker_window")
+}
+
+/// The layer the picker draws on: a plugin's parameters form is a modal card on the foreground
+/// layer, over a backdrop that blocks everything below it, so the picker opened from it joins that
+/// layer (and [`crate::plugins_ui`] keeps it above the card). Anywhere else it is an ordinary window.
+fn picker_order(app: &FigApp, target: &PickerTarget) -> egui::Order {
+    match target {
+        PickerTarget::PluginField { plugin, .. } if app.ui.plugin_form.as_ref().is_some_and(|f| f.id == *plugin) => egui::Order::Foreground,
+        _ => egui::Order::Middle,
+    }
+}
+
+/// The picker's layer when a plugin's parameters form is open under it.
+pub(crate) fn form_layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Foreground, picker_id())
+}
+
 pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let Some(target) = app.ui.picker.clone() else { return };
     // A layer's picker belongs to the selection it was opened for: once that changes, close it
@@ -448,6 +468,8 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close_now = false;
     egui::Window::new("color_picker")
+        .id(picker_id())
+        .order(picker_order(app, &target))
         .title_bar(false)
         .fixed_pos(pos)
         .fixed_size(vec2(240.0, 0.0))

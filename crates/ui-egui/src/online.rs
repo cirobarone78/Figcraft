@@ -256,18 +256,18 @@ pub fn dialogs(app: &mut FigApp, ctx: &egui::Context) {
     dialog_keys(app, ctx);
     let t = Tokens::get(ctx);
     if let Some((server, file, name)) = app.ui.online.remove.take() {
-        let (mut open, mut cancel, mut go) = (true, false, false);
-        crate::dialogs::window(tr("Remove from server"), ctx).id(egui::Id::new("Remove online file")).open(&mut open).show(ctx, |ui| {
-            ui.set_width(380.0);
+        let (mut cancel, mut go) = (false, false);
+        let ((), close) = crate::dialogs::card(egui::Id::new("Remove online file"), tr("Remove from server"), 380.0, ctx, |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             widgets::label(ui, &trf("Remove {name} from {server}?", &[("name", &name), ("server", &server_host(&server))]), t.text);
             widgets::label(
                 ui,
-                tr("The file is deleted from the server: nobody can open or join it from there again, and this can't be undone. Copies that are open stay with whoever has them."),
+                tr(
+                    "The file is deleted from the server: nobody can open or join it from there again, and this can't be undone. Copies that are open stay with whoever has them.",
+                ),
                 t.danger,
             );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            crate::dialogs::footer(ui, |ui| {
                 go = widgets::button(ui, tr("Remove"), true, true).clicked();
                 cancel = widgets::button(ui, tr("Cancel"), false, true).clicked();
             });
@@ -275,15 +275,14 @@ pub fn dialogs(app: &mut FigApp, ctx: &egui::Context) {
         if go {
             let said = trf("{name} was removed from the server", &[("name", &name)]);
             manage(app, ctx, (&server, &file), "remove", json!({}), Box::new(move |app, _, _| app.toast(said)));
-        } else if open && !cancel {
+        } else if !close && !cancel {
             app.ui.online.remove = Some((server, file, name));
         }
     }
     if let Some((server, file, mut name)) = app.ui.online.rename.take() {
-        let (mut open, mut cancel, mut go) = (true, false, false);
+        let (mut cancel, mut go) = (false, false);
         let focus = std::mem::take(&mut app.ui.online.focus_rename);
-        crate::dialogs::window(tr("Rename on the server"), ctx).id(egui::Id::new("Rename online file")).open(&mut open).show(ctx, |ui| {
-            ui.set_width(380.0);
+        let ((), close) = crate::dialogs::card(egui::Id::new("Rename online file"), tr("Rename on the server"), 380.0, ctx, |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             widgets::label(ui, tr("The name in your online files and on the server. The document inside keeps its own name."), t.text_secondary);
             let resp = widgets::text_input(ui, egui::Id::new("online_rename"), &mut name, 380.0, tr("File name"));
@@ -292,15 +291,14 @@ pub fn dialogs(app: &mut FigApp, ctx: &egui::Context) {
                 resp.request_focus();
             }
             go = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            crate::dialogs::footer(ui, |ui| {
                 go |= widgets::button(ui, tr("Rename"), true, !name.trim().is_empty()).clicked();
                 cancel = widgets::button(ui, tr("Cancel"), false, true).clicked();
             });
         });
         if go && !name.trim().is_empty() {
             manage(app, ctx, (&server, &file), "rename", json!({"name": name.trim()}), Box::new(|_, _, _| {}));
-        } else if open && !cancel {
+        } else if !close && !cancel {
             app.ui.online.rename = Some((server, file, name));
         }
     }

@@ -1071,12 +1071,10 @@ pub fn join_dialog(app: &mut FigApp, ctx: &egui::Context) {
     dialog_keys(app, ctx);
     let Some(mut link) = app.ui.live.join.take() else { return };
     let t = Tokens::get(ctx);
-    let mut open = true;
     let mut cancel = false;
     let mut go = false;
     let focus = std::mem::take(&mut app.ui.live.focus_join);
-    crate::dialogs::window(tr("Join live session"), ctx).id(egui::Id::new("Join live session")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(380.0);
+    let ((), close) = crate::dialogs::card(egui::Id::new("Join live session"), tr("Join live session"), 380.0, ctx, |ui| {
         widgets::label(ui, tr("Type the join code you were given, or paste an invite link."), t.text);
         ui.horizontal(|ui| {
             go = join_field(app, ui, &mut link, egui::Id::new("live_join_link"), 300.0, focus).is_some();
@@ -1090,7 +1088,7 @@ pub fn join_dialog(app: &mut FigApp, ctx: &egui::Context) {
     if go {
         return;
     }
-    if open && !cancel {
+    if !close && !cancel {
         app.ui.live.join = Some(link);
     }
 }
@@ -1136,7 +1134,6 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
     published_dialog(app, ctx);
     let Some(mut form) = app.ui.live.publish.take() else { return };
     let t = Tokens::get(ctx);
-    let mut open = true;
     let mut cancel = false;
     let mut go = false;
     let mut ask = false;
@@ -1148,8 +1145,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
     let open_server = info.as_ref().is_some_and(|v| v["open"] == true);
     // A first look at an address already filled in.
     ask |= focus && !address.is_empty() && !keyed && info.is_none();
-    crate::dialogs::window(tr("Publish to server"), ctx).id(egui::Id::new("Publish to server")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(380.0);
+    let ((), close) = crate::dialogs::card(egui::Id::new("Publish to server"), tr("Publish to server"), 380.0, ctx, |ui| {
         widgets::label(
             ui,
             tr("Uploads this file to a FigCraft server and keeps this tab in sync with it. You get a link to edit and a link to view."),
@@ -1196,8 +1192,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
         a11y::text(&nresp, tr("File name"), &form.name);
         crate::widgets::select_all_on_focus(ui, &nresp, &form.name);
         go |= nresp.lost_focus() && enter(ui) && (keyed || open_server);
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        crate::dialogs::footer(ui, |ui| {
             go |= widgets::button(ui, tr("Publish"), true, keyed || open_server).clicked();
             cancel = widgets::button(ui, tr("Cancel"), false, true).clicked();
         });
@@ -1212,7 +1207,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
         app.cancel_background(SERVER_INFO);
         return;
     }
-    if open && !cancel {
+    if !close && !cancel {
         app.ui.live.publish = Some(form);
     } else {
         app.cancel_background(SERVER_INFO);
@@ -1237,10 +1232,8 @@ fn published_dialog(app: &mut FigApp, ctx: &egui::Context) {
     let hosting = live.hosting.clone();
     let owner = p.owner.clone().unwrap_or_default();
     let t = Tokens::get(ctx);
-    let mut open = true;
     let mut done = false;
-    crate::dialogs::window(tr("File published"), ctx).id(egui::Id::new("File published")).open(&mut open).show(ctx, |ui| {
-        ui.set_width(400.0);
+    let ((), close) = crate::dialogs::card(egui::Id::new("File published"), tr("File published"), 400.0, ctx, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         widgets::label(ui, &trf("{name} is on the server.", &[("name", &p.name)]), t.text);
         link_rows(app, ui, &[(tr("Owner token"), &owner, tr("Owner token copied"))]);
@@ -1251,10 +1244,11 @@ fn published_dialog(app: &mut FigApp, ctx: &egui::Context) {
             host_line(ui, &t, &h.operator, &h.terms);
         }
         widgets::label(ui, tr(PLAIN_NOTE), t.text_secondary);
-        ui.add_space(4.0);
-        done = widgets::button(ui, tr("Done"), true, true).clicked();
+        crate::dialogs::footer(ui, |ui| {
+            done = widgets::button(ui, tr("Done"), true, true).clicked();
+        });
     });
-    if !open || done {
+    if close || done {
         app.ui.live.owner = None;
     }
 }
