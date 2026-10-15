@@ -15,6 +15,17 @@ Every subcommand takes `--no-system-fonts` (or set `FIGCRAFT_NO_SYSTEM_FONTS=1`,
 app honours too) to use only the built-in fonts, for renders that come out the same on every
 machine, e.g. in CI.
 
+On Linux, FigCraft also asks `fc-list` for the font files selected by the current Fontconfig
+configuration, including custom font directories. Files from the usual system folders keep
+priority; configured files are appended in filename order. This discovers files, rather than
+applying Fontconfig's font matching or substitution rules. `fc-list` is optional: when it is
+missing, fails, or exceeds a 10-second query-wait deadline, 16 MiB of output or 64 KiB of diagnostics,
+FigCraft keeps the usual-folder scan and discards the incomplete query. The system-font opt-out
+skips both scans and the query. The deadline covers nonblocking query waits, not a hard return
+time: process creation, synchronous cleanup during uninterruptible kernel I/O, and later font-file
+reads can take longer. Cleanup stops the owned process group and reaps its child. The existing
+supported-format and 64 MiB per-file limits apply.
+
 The collaboration server is a binary of its own, `figcraft-server` (`cargo build --release -p
 figcraft-server`): it keeps files with share links and serves their live sessions, and its
 `key`, `files`, `links`, `reports`, `block-ip` and `check` subcommands manage them (a server can
